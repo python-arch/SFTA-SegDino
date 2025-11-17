@@ -30,7 +30,9 @@ Organize datasets in the following structure:
 ./segdata/isic
 ```
 
-Each dataset folder should contain an `image` or `images` directory and a `mask` or `masks` directory.
+**NOTE: I have already preprocessed kvasir, so it can be used directly**
+
+Each dataset folder should contain an  `images` directory and a  `masks` directory. However, you can change the base dir from the args.
 
 ## finetuning for kvasir
 
@@ -38,6 +40,4 @@ Each dataset folder should contain an `image` or `images` directory and a `mask`
 ```bash
 python lora_segdino.py --dino_ckpt /home/ahmedjaheen/SegDino/segdino/dinov3_vits16_pretrain_lvd1689m-08c60483.pth --dino_size s --dataset kvasir
 ```
-```
-
 
