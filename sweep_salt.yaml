@@ -1,0 +1,36 @@
+program: PEFT_segdino.py
+method: grid
+
+metric:
+  name: val_dice
+  goal: maximize
+
+parameters:
+  # adapter type (constant for this sweep)
+  adapter:
+    value: salt
+
+  # grid for salt
+  salt_rank:
+    values: [4, 8, 16, 32, 64, 128]
+
+  salt_r_lora:
+    values: [4, 8, 16, 32, 64]
+
+  # seeds
+  seed:
+    values: [42, 7, 2023]
+
+  # constants (passed as CLI flags by wandb automatically)
+  dino_ckpt:
+    value: "/home/ahmedjaheen/SegDino/segdino/dinov3_vits16_pretrain_lvd1689m-08c60483.pth"
+
+  dino_size:
+    value: "s"
+
+  dataset:
+    value: "kvasir"
+
+  # Enable wandb from inside the script by presence of the --wandb flag.
+  # Do NOT declare wandb as a parameter (it can lead to `--wandb True`).
+  # Instead we will enable it via programmatic default or let the agent add it (see note below).
