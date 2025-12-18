@@ -38,6 +38,13 @@ BOUNDARY_TOL_PX="2"
 SELFTRAIN_CONF_THR="0.9"
 TRAINABLE="head"
 TEACHER_KL_WEIGHT="1.0"
+ADAPTER="none"
+LORA_R="8"
+LORA_ALPHA="16"
+LORA_DROPOUT="0.05"
+SALT_RANK="8"
+SALT_R_LORA="8"
+SALT_SEED="42"
 
 OUT_CSV="./runs/adapt_baselines.csv"
 
@@ -68,6 +75,13 @@ while [[ $# -gt 0 ]]; do
     --selftrain_conf_thr) SELFTRAIN_CONF_THR="$2"; shift 2;;
     --trainable) TRAINABLE="$2"; shift 2;;
     --teacher_kl_weight) TEACHER_KL_WEIGHT="$2"; shift 2;;
+    --adapter) ADAPTER="$2"; shift 2;;
+    --lora_r) LORA_R="$2"; shift 2;;
+    --lora_alpha) LORA_ALPHA="$2"; shift 2;;
+    --lora_dropout) LORA_DROPOUT="$2"; shift 2;;
+    --salt_rank) SALT_RANK="$2"; shift 2;;
+    --salt_r_lora) SALT_R_LORA="$2"; shift 2;;
+    --salt_seed) SALT_SEED="$2"; shift 2;;
 
     --out_csv) OUT_CSV="$2"; shift 2;;
     -h|--help)
@@ -116,6 +130,13 @@ for METHOD in "${METHODS[@]}"; do
     --selftrain_conf_thr "${SELFTRAIN_CONF_THR}" \
     --trainable "${TRAINABLE}" \
     --teacher_kl_weight "${TEACHER_KL_WEIGHT}" \
+    --adapter "${ADAPTER}" \
+    --lora_r "${LORA_R}" \
+    --lora_alpha "${LORA_ALPHA}" \
+    --lora_dropout "${LORA_DROPOUT}" \
+    --salt_rank "${SALT_RANK}" \
+    --salt_r_lora "${SALT_R_LORA}" \
+    --salt_seed "${SALT_SEED}" \
     --ckpt "${CKPT}" \
     --dino_ckpt "${DINO_CKPT}" \
     --dino_size "${DINO_SIZE}" \

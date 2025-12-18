@@ -14,6 +14,7 @@ import torch.nn.functional as F
 from torch import nn
 from torch.utils.data import DataLoader
 
+from segdino.adapters import LoRASpec, SALTSpec, apply_peft_to_backbone, count_parameters
 from segdino.corruption_transform import CorruptionTransform
 from segdino.corruptions import CorruptionSpec, MixedCorruptionSpec
 from segdino.data import (
@@ -205,6 +206,15 @@ def main() -> None:
     parser.add_argument("--selftrain_conf_thr", type=float, default=0.9)
     parser.add_argument("--teacher_kl_weight", type=float, default=1.0, help="Stabilizer weight (teacher||student KL) on weak view.")
 
+    # PEFT-only baselines (adapter injection into backbone attention linears)
+    parser.add_argument("--adapter", type=str, default="none", choices=["none", "lora", "salt"])
+    parser.add_argument("--lora_r", type=int, default=8)
+    parser.add_argument("--lora_alpha", type=int, default=16)
+    parser.add_argument("--lora_dropout", type=float, default=0.05)
+    parser.add_argument("--salt_rank", type=int, default=8)
+    parser.add_argument("--salt_r_lora", type=int, default=8)
+    parser.add_argument("--salt_seed", type=int, default=42)
+
     parser.add_argument("--ckpt", type=str, required=True)
     parser.add_argument("--dino_ckpt", type=str, required=True)
     parser.add_argument("--dino_size", type=str, default="s", choices=["b", "s"])
@@ -226,6 +236,25 @@ def main() -> None:
 
     model = DPT(encoder_size=encoder_size, nclass=1, backbone=backbone).to(device)
     load_ckpt_flex(model, args.ckpt, map_location=device)
+
+    # Optional: inject PEFT adapter (then only adapter params remain trainable).
+    peft_info: Dict[str, int] = {"wrapped": 0}
+    if args.adapter != "none":
+        if args.adapter == "lora":
+            peft_info = apply_peft_to_backbone(
+                model,
+                adapter="lora",
+                lora=LoRASpec(r=args.lora_r, alpha=args.lora_alpha, dropout=args.lora_dropout),
+            )
+        else:
+            peft_info = apply_peft_to_backbone(
+                model,
+                adapter="salt",
+                salt=SALTSpec(rank=args.salt_rank, r_lora=args.salt_r_lora, seed=args.salt_seed),
+            )
+
+        total, trainable, pct = count_parameters(model)
+        print(f"[PEFT] adapter={args.adapter} wrapped={peft_info.get('wrapped',0)} trainable={trainable}/{total} ({pct:.3f}%)")
 
     # Fixed teacher to prevent catastrophic drift/collapse for non-symbolic baselines.
     teacher = copy.deepcopy(model).to(device)
@@ -288,7 +317,11 @@ def main() -> None:
     if args.method == "tent":
         params = select_tent_params(model)
     else:
-        params = set_trainable(model, args.trainable)
+        if args.adapter != "none":
+            # PEFT path: adapter injection already froze everything except adapter params.
+            params = [p for p in model.parameters() if p.requires_grad]
+        else:
+            params = set_trainable(model, args.trainable)
 
     if not params:
         raise RuntimeError("No trainable parameters selected. Check method/selection logic.")
@@ -358,6 +391,8 @@ def main() -> None:
         "steps": args.steps,
         "batch_size": args.batch_size,
         "lr": args.lr,
+        "adapter": args.adapter,
+        "peft_wrapped": peft_info.get("wrapped", 0),
         "dice": metrics["dice"],
         "iou": metrics["iou"],
         "boundary_f": metrics["boundary_f"],

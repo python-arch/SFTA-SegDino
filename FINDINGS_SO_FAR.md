@@ -55,6 +55,22 @@ This is exactly the “stress knob” we need:
 
 This supports the protocol design: **use `mixed ops4 S4` as the stress-test regime** and `mixed ops2` as a moderate regime.
 
+## Pseudo-label quality diagnostics (holdout, per-image)
+We ran `tools/pseudolabel_quality.py` to produce per-image CSVs that quantify:
+- per-image Dice/IoU/BoundaryF/HD95
+- mean pixel entropy of the soft mask
+- “confidence mass” proxies such as `frac_conf` and `frac_conf_fg` at `conf_thr=0.9`
+- a precision-only proxy `conf_fg_precision` (how often confident predicted-FG pixels fall on GT-FG)
+
+### Observation
+- `mixed ops4 S4` shows **high dispersion**:
+  - some images remain easy (Dice > 0.9),
+  - some images are catastrophic (Dice ~0.1–0.4, very large HD95).
+- `mixed ops2 S4` is **much easier overall**, with many images in the ~0.8–0.95 Dice range, but still contains a few hard outliers.
+
+### Interpretation / reasoning
+This supports a key paper claim: under severe shift, pseudo-label reliability is **heterogeneous and brittle**—even if a subset of pixels is high-confidence, global mask quality can be poor. This is exactly the regime where “structure/symbolic” regularization may provide signal beyond naive pseudo-labeling.
+
 ## First attempt at adaptation baselines collapsed (and why)
 ### Observation
 Initial baseline adaptation runs (entropy / consistency / self-train / tent) collapsed to **all-empty predictions** (empty_rate=1.0).
@@ -91,6 +107,24 @@ This is consistent with expectations:
 - Self-training remains sensitive to pseudo-label noise even with stabilization; under severe shift it can underperform simpler methods.
 - TENT often gives modest gains by adjusting normalization statistics/affines without changing the model’s core semantics.
 
+## Baseline ladder results (mixed ops4 across severities)
+We ran the full baseline suite (entropy / consistency / self-train / TENT) under `mixed ops4` for severities `S2`, `S3`, and a **clean** `S4` run (to avoid earlier pre-stabilization collapsed rows).
+
+### AUSC-style aggregation (mean across S2–S4 under mixed ops4)
+Ranking observed:
+- `tent` best overall (highest mean Dice/IoU and best mean boundary F-score)
+- `entropy` and `consistency` are close behind
+- `selftrain` is the weakest overall (consistent with pseudo-label brittleness)
+
+### Stress test snapshot (mixed ops4 S4, clean)
+Representative results (holdout `n=40`):
+- `tent`: best Dice/IoU (≈0.737 Dice)
+- `entropy`: slightly lower Dice but competitive; can be best on boundary F-score in some runs
+- `selftrain`: may achieve better HD95 but is less reliable and can produce rare empty predictions
+
+## Moderate regime baseline (mixed ops2 S4)
+Under `mixed ops2 S4`, all methods are stable and high-performing (Dice ≈0.81–0.84), and `tent` again tends to be best overall.
+
 ## Practical takeaways for the next stage (learned-symbolic method)
 - The regime `mixed ops4 S4` is sufficiently hard to be a meaningful stress test.
 - We now have stable baselines to beat; **TENT is currently the strongest** on Dice/IoU in this regime.
@@ -103,3 +137,10 @@ This is consistent with expectations:
 - Holdout is 40 images (fine for iteration but still somewhat noisy); we should run 3 seeds later.
 - We haven’t yet produced the per-image pseudo-label confidence/entropy plots that justify “pseudo-labels are poor” in a figure; that’s the next diagnostic.
 
+## Immediate next milestone
+Implement and evaluate **PEFT-only baselines** (LoRA/SALT), under matched trainable parameter budgets, using the same stabilized adaptation runner:
+- train adapters on `target_adapt` only
+- evaluate on `target_holdout`
+- compare vs strongest non-symbolic baseline (TENT) and vs source-only in both:
+  - moderate regime: `mixed ops2 S4`
+  - stress regime: `mixed ops4 S4`
