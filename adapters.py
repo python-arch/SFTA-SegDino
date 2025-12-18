@@ -32,8 +32,10 @@ class LoRALinear(nn.Module):
         self.dropout = nn.Dropout(dropout) if dropout and dropout > 0 else nn.Identity()
 
         if self.r > 0:
-            self.lora_A = nn.Parameter(torch.zeros(base.in_features, self.r))
-            self.lora_B = nn.Parameter(torch.zeros(self.r, base.out_features))
+            device = base.weight.device
+            dtype = base.weight.dtype
+            self.lora_A = nn.Parameter(torch.zeros(base.in_features, self.r, device=device, dtype=dtype))
+            self.lora_B = nn.Parameter(torch.zeros(self.r, base.out_features, device=device, dtype=dtype))
             nn.init.kaiming_uniform_(self.lora_A, a=math.sqrt(5))
             nn.init.zeros_(self.lora_B)
         else:
@@ -58,7 +60,18 @@ class SALTLinear(nn.Linear):
     """
 
     def __init__(self, base: nn.Linear, rank: int = 8, r_lora: int = 8, seed: int = 42) -> None:
-        super().__init__(base.in_features, base.out_features, bias=base.bias is not None)
+        # Try to create parameters on the same device/dtype as the base layer.
+        try:
+            super().__init__(
+                base.in_features,
+                base.out_features,
+                bias=base.bias is not None,
+                device=base.weight.device,
+                dtype=base.weight.dtype,
+            )
+        except TypeError:
+            super().__init__(base.in_features, base.out_features, bias=base.bias is not None)
+            self.to(device=base.weight.device, dtype=base.weight.dtype)
 
         self.weight.data.copy_(base.weight.data)
         if base.bias is not None and self.bias is not None:
@@ -84,8 +97,10 @@ class SALTLinear(nn.Linear):
         self.trainable_scale_A = nn.Parameter(torch.ones(self.rank))
         self.trainable_shift_B = nn.Parameter(torch.zeros(self.rank))
 
-        self.trainable_X = nn.Parameter(torch.randn(remaining_rank, self.r_lora) * 0.01)
-        self.trainable_Y = nn.Parameter(torch.randn(self.r_lora, remaining_rank) * 0.01)
+        device = self.weight.device
+        dtype = self.weight.dtype
+        self.trainable_X = nn.Parameter(torch.randn(remaining_rank, self.r_lora, device=device, dtype=dtype) * 0.01)
+        self.trainable_Y = nn.Parameter(torch.randn(self.r_lora, remaining_rank, device=device, dtype=dtype) * 0.01)
 
     def _compute_svd(self) -> None:
         U, S, Vt = torch.linalg.svd(self.weight, full_matrices=False)
@@ -160,9 +175,10 @@ def set_only_adapter_trainable(model: nn.Module) -> int:
     n = 0
     for m in model.modules():
         if isinstance(m, LoRALinear):
-            for p in m.parameters():
-                if p is not m.base.weight and p is not m.base.bias:
-                    p.requires_grad_(True)
+            if isinstance(m.lora_A, torch.Tensor):
+                m.lora_A.requires_grad_(True)
+            if isinstance(m.lora_B, torch.Tensor):
+                m.lora_B.requires_grad_(True)
         if isinstance(m, SALTLinear):
             for p in m.parameters():
                 # SALTLinear inherits nn.Linear and has frozen weight/bias; other parameters are trainable.
@@ -244,4 +260,3 @@ def choose_lora_rank_for_budget(
             best_err = err
             best_r = int(r)
     return best_r
-

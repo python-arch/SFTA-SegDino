@@ -253,6 +253,9 @@ def main() -> None:
                 salt=SALTSpec(rank=args.salt_rank, r_lora=args.salt_r_lora, seed=args.salt_seed),
             )
 
+        # Adapter parameters may have been created on CPU; ensure the whole model is on the selected device.
+        model = model.to(device)
+
         total, trainable, pct = count_parameters(model)
         print(f"[PEFT] adapter={args.adapter} wrapped={peft_info.get('wrapped',0)} trainable={trainable}/{total} ({pct:.3f}%)")
 
