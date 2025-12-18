@@ -127,11 +127,14 @@ class LoRALinear(nn.Module):
         self.base = base
         for p in self.base.parameters():
             p.requires_grad = False
-        self.r = r
-        self.scaling = (alpha / r) if r and r > 0 else 1.0
+        self.r = int(r)
+        self.alpha = int(alpha)
+        self.scaling = (self.alpha / self.r) if self.r and self.r > 0 else 1.0
         if r and r > 0:
-            self.lora_A = nn.Parameter(torch.zeros(base.in_features, r))
-            self.lora_B = nn.Parameter(torch.zeros(r, base.out_features))
+            device = base.weight.device
+            dtype = base.weight.dtype
+            self.lora_A = nn.Parameter(torch.zeros(base.in_features, self.r, device=device, dtype=dtype))
+            self.lora_B = nn.Parameter(torch.zeros(self.r, base.out_features, device=device, dtype=dtype))
             nn.init.kaiming_uniform_(self.lora_A, a=math.sqrt(5))
             nn.init.zeros_(self.lora_B)
             self.dropout = nn.Dropout(dropout) if dropout > 0 else nn.Identity()
@@ -248,7 +251,9 @@ class SALTLinear(nn.Linear):
         new_s, scale_shift_term, LoRA_term = self.get_modified_singular_values()
         s_new = F.relu(new_s.to(input.device))
 
-        weight_updated = self.U @ s_new @ self.Vt
+        U = self.U.to(device=input.device, dtype=input.dtype)
+        Vt = self.Vt.to(device=input.device, dtype=input.dtype)
+        weight_updated = U @ s_new.to(dtype=input.dtype) @ Vt
         
         return F.linear(input, weight_updated, self.bias)
 
