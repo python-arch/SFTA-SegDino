@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import csv
 import math
+import copy
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Tuple
 
@@ -78,6 +79,18 @@ def entropy_loss_from_logits(logits: torch.Tensor, eps: float = 1e-6) -> torch.T
     h = -(p * torch.log(p) + (1.0 - p) * torch.log(1.0 - p))
     return h.mean()
 
+def kl_to_teacher(student_logits: torch.Tensor, teacher_logits: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
+    """
+    KL( teacher || student ) for Bernoulli per-pixel distributions, averaged.
+    This is a stabilizer: keeps student close to a fixed/EMA teacher on the same target images.
+    """
+    ps = torch.sigmoid(student_logits)
+    pt = torch.sigmoid(teacher_logits).detach()
+    ps = torch.clamp(ps, eps, 1.0 - eps)
+    pt = torch.clamp(pt, eps, 1.0 - eps)
+    kl = pt * torch.log(pt / ps) + (1.0 - pt) * torch.log((1.0 - pt) / (1.0 - ps))
+    return kl.mean()
+
 
 def consistency_loss(logits_w: torch.Tensor, logits_s: torch.Tensor) -> torch.Tensor:
     pw = torch.sigmoid(logits_w).detach()
@@ -101,6 +114,33 @@ def self_training_loss(logits_s: torch.Tensor, logits_w: torch.Tensor, conf_thr:
     loss = F.binary_cross_entropy(ps[mask], y[mask])
     frac = float(mask.float().mean().item())
     return loss, frac
+
+
+def set_trainable(model: nn.Module, trainable: str) -> List[nn.Parameter]:
+    """
+    Select which parameters are trainable.
+
+    - all: everything trainable (not recommended for source-free baselines)
+    - head: only segmentation head trainable (recommended default)
+    """
+    if trainable not in {"all", "head"}:
+        raise ValueError(f"Unknown trainable option: {trainable}")
+
+    if trainable == "all":
+        for p in model.parameters():
+            p.requires_grad_(True)
+        return [p for p in model.parameters() if p.requires_grad]
+
+    # head-only
+    for p in model.parameters():
+        p.requires_grad_(False)
+
+    head = getattr(model, "head", None)
+    if head is None:
+        raise AttributeError("Model has no `.head`; cannot use trainable=head mode.")
+    for p in head.parameters():
+        p.requires_grad_(True)
+    return [p for p in model.parameters() if p.requires_grad]
 
 
 @torch.no_grad()
@@ -159,9 +199,11 @@ def main() -> None:
     parser.add_argument("--num_workers", type=int, default=4)
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--weight_decay", type=float, default=0.0)
+    parser.add_argument("--trainable", type=str, default="head", choices=["head", "all"], help="Which parameters to update for non-TENT methods.")
     parser.add_argument("--dice_thr", type=float, default=0.5)
     parser.add_argument("--boundary_tol_px", type=int, default=2)
     parser.add_argument("--selftrain_conf_thr", type=float, default=0.9)
+    parser.add_argument("--teacher_kl_weight", type=float, default=1.0, help="Stabilizer weight (teacher||student KL) on weak view.")
 
     parser.add_argument("--ckpt", type=str, required=True)
     parser.add_argument("--dino_ckpt", type=str, required=True)
@@ -184,6 +226,12 @@ def main() -> None:
 
     model = DPT(encoder_size=encoder_size, nclass=1, backbone=backbone).to(device)
     load_ckpt_flex(model, args.ckpt, map_location=device)
+
+    # Fixed teacher to prevent catastrophic drift/collapse for non-symbolic baselines.
+    teacher = copy.deepcopy(model).to(device)
+    teacher.eval()
+    for p in teacher.parameters():
+        p.requires_grad_(False)
 
     # corruption hook (applied before view generation / normalization)
     if args.corruption == "mixed":
@@ -240,9 +288,7 @@ def main() -> None:
     if args.method == "tent":
         params = select_tent_params(model)
     else:
-        for p in model.parameters():
-            p.requires_grad_(True)
-        params = [p for p in model.parameters() if p.requires_grad]
+        params = set_trainable(model, args.trainable)
 
     if not params:
         raise RuntimeError("No trainable parameters selected. Check method/selection logic.")
@@ -272,19 +318,24 @@ def main() -> None:
 
         optimizer.zero_grad(set_to_none=True)
         lw = model(xw)
+        with torch.no_grad():
+            lw_t = teacher(xw)
 
         if args.method == "entropy":
-            loss = entropy_loss_from_logits(lw)
+            loss = entropy_loss_from_logits(lw) + args.teacher_kl_weight * kl_to_teacher(lw, lw_t)
         elif args.method == "consistency":
             ls = model(xs)
-            loss = consistency_loss(lw, ls)
+            # Student strong should match a fixed teacher prediction from weak.
+            loss = consistency_loss(lw_t, ls) + args.teacher_kl_weight * kl_to_teacher(lw, lw_t)
         elif args.method == "selftrain":
             ls = model(xs)
-            loss, used_frac = self_training_loss(ls, lw, conf_thr=args.selftrain_conf_thr)
+            # Use teacher weak logits to generate pseudo-labels, and stabilize student via KL.
+            loss, used_frac = self_training_loss(ls, lw_t, conf_thr=args.selftrain_conf_thr)
+            loss = loss + args.teacher_kl_weight * kl_to_teacher(lw, lw_t)
             used_frac_ema = used_frac if used_frac_ema is None else 0.9 * used_frac_ema + 0.1 * used_frac
         elif args.method == "tent":
             # TENT typically uses entropy; params already restricted to norm affine
-            loss = entropy_loss_from_logits(lw)
+            loss = entropy_loss_from_logits(lw) + args.teacher_kl_weight * kl_to_teacher(lw, lw_t)
         else:
             raise ValueError(f"Unknown method: {args.method}")
 

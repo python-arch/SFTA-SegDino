@@ -36,6 +36,8 @@ NUM_WORKERS="4"
 DICE_THR="0.5"
 BOUNDARY_TOL_PX="2"
 SELFTRAIN_CONF_THR="0.9"
+TRAINABLE="head"
+TEACHER_KL_WEIGHT="1.0"
 
 OUT_CSV="./runs/adapt_baselines.csv"
 
@@ -64,6 +66,8 @@ while [[ $# -gt 0 ]]; do
     --dice_thr) DICE_THR="$2"; shift 2;;
     --boundary_tol_px) BOUNDARY_TOL_PX="$2"; shift 2;;
     --selftrain_conf_thr) SELFTRAIN_CONF_THR="$2"; shift 2;;
+    --trainable) TRAINABLE="$2"; shift 2;;
+    --teacher_kl_weight) TEACHER_KL_WEIGHT="$2"; shift 2;;
 
     --out_csv) OUT_CSV="$2"; shift 2;;
     -h|--help)
@@ -110,6 +114,8 @@ for METHOD in "${METHODS[@]}"; do
     --dice_thr "${DICE_THR}" \
     --boundary_tol_px "${BOUNDARY_TOL_PX}" \
     --selftrain_conf_thr "${SELFTRAIN_CONF_THR}" \
+    --trainable "${TRAINABLE}" \
+    --teacher_kl_weight "${TEACHER_KL_WEIGHT}" \
     --ckpt "${CKPT}" \
     --dino_ckpt "${DINO_CKPT}" \
     --dino_size "${DINO_SIZE}" \
