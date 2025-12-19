@@ -96,6 +96,17 @@ def kl_to_teacher(student_logits: torch.Tensor, teacher_logits: torch.Tensor, ep
     kl = pt * torch.log(pt / ps) + (1.0 - pt) * torch.log((1.0 - pt) / (1.0 - ps))
     return kl.mean()
 
+def fg_fraction_prior(student_logits: torch.Tensor, teacher_logits: torch.Tensor) -> torch.Tensor:
+    """
+    Scalar stabilizer: match the mean predicted foreground probability of the student to the teacher.
+    Helps prevent the all-background collapse when `teacher_kl_weight` is reduced/disabled.
+    """
+    ps = torch.sigmoid(student_logits)
+    pt = torch.sigmoid(teacher_logits).detach()
+    fs = ps.mean()
+    ft = pt.mean()
+    return F.mse_loss(fs, ft)
+
 
 def consistency_loss(logits_w: torch.Tensor, logits_s: torch.Tensor) -> torch.Tensor:
     pw = torch.sigmoid(logits_w).detach()
@@ -209,6 +220,12 @@ def main() -> None:
     parser.add_argument("--boundary_tol_px", type=int, default=2)
     parser.add_argument("--selftrain_conf_thr", type=float, default=0.9)
     parser.add_argument("--teacher_kl_weight", type=float, default=1.0, help="Stabilizer weight (teacher||student KL) on weak view.")
+    parser.add_argument(
+        "--fg_prior_weight",
+        type=float,
+        default=0.0,
+        help="Stabilizer weight for matching student mean foreground probability to teacher (prevents empty-mask collapse when KL is small).",
+    )
 
     # PEFT-only baselines (adapter injection into backbone attention linears)
     parser.add_argument("--adapter", type=str, default="none", choices=["none", "lora", "salt"])
@@ -347,6 +364,7 @@ def main() -> None:
     if args.use_symbolic:
         if not args.symbolic_ckpt:
             raise ValueError("--use_symbolic requires --symbolic_ckpt")
+        # Prefer `weights_only=True` when supported to avoid unpickling arbitrary objects.
         try:
             obj = torch.load(args.symbolic_ckpt, map_location=device, weights_only=True)
         except TypeError:
@@ -371,6 +389,10 @@ def main() -> None:
             encoder=enc,
             ema_global=EMAStats(dim=embed_dim, momentum=args.symbolic_ema_momentum),
             ema_boundary=EMAStats(dim=embed_dim, momentum=args.symbolic_ema_momentum),
+        )
+        print(
+            f"[Symbolic] enabled ckpt={args.symbolic_ckpt} lambda={args.symbolic_lambda} "
+            f"warmup={args.symbolic_warmup_steps} ema_m={args.symbolic_ema_momentum} conf_thr={args.symbolic_conf_thr}"
         )
 
     model.train()
@@ -416,6 +438,9 @@ def main() -> None:
             loss = entropy_loss_from_logits(lw) + args.teacher_kl_weight * kl_to_teacher(lw, lw_t)
         else:
             raise ValueError(f"Unknown method: {args.method}")
+
+        if args.fg_prior_weight and args.fg_prior_weight > 0:
+            loss = loss + float(args.fg_prior_weight) * fg_fraction_prior(lw, lw_t)
 
         if sym is not None and step >= args.symbolic_warmup_steps:
             p = torch.sigmoid(lw)
