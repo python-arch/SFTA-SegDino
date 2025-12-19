@@ -67,7 +67,21 @@ def main() -> None:
     parser.add_argument("--boundary_width", type=int, default=2)
 
     parser.add_argument("--embed_dim", type=int, default=64)
+    parser.add_argument(
+        "--image_encoder",
+        type=str,
+        default="small_cnn",
+        choices=["small_cnn", "resnet18", "resnet34", "mobilenet_v3_small"],
+        help="Image encoder backbone. Prefer small_cnn if you want zero external dependencies.",
+    )
     parser.add_argument("--image_width", type=int, default=32)
+    parser.add_argument(
+        "--image_weights",
+        type=str,
+        default="none",
+        choices=["none", "imagenet"],
+        help="If using a torchvision backbone, optionally initialize with ImageNet weights (may require local availability).",
+    )
     parser.add_argument("--fusion", type=str, default="mlp", choices=["mlp", "attn"])
 
     parser.add_argument("--w_mask", type=float, default=1.0)
@@ -94,7 +108,14 @@ def main() -> None:
     if args.embed_dim != int(mask_meta["embed_dim"]):
         print(f"[Warn] --embed_dim={args.embed_dim} != mask_encoder.embed_dim={mask_meta['embed_dim']}; using {args.embed_dim} for multimodal head.")
 
-    cfg = MultiModalConfig(embed_dim=args.embed_dim, mask_width=int(mask_meta["width"]), image_width=args.image_width, fusion=args.fusion)
+    cfg = MultiModalConfig(
+        embed_dim=args.embed_dim,
+        mask_width=int(mask_meta["width"]),
+        image_encoder=args.image_encoder,
+        image_width=args.image_width,
+        image_weights=args.image_weights,
+        fusion=args.fusion,
+    )
     model = MultiModalSymbolicEncoder(mask_encoder=mask_enc, cfg=cfg).to(device)
 
     # Only train image encoder + fusion.

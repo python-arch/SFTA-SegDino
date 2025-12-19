@@ -46,13 +46,13 @@ try:
     from segdino.symalign.prior import EMAStats
     from segdino.symalign.symbolic_loss import SymbolicAlignment
     from segdino.symalign.multimodal_encoder import MultiModalConfig, MultiModalSymbolicEncoder
-    from segdino.symalign.multimodal_symbolic_loss import MultiModalSymbolicAlignment
+    from segdino.symalign.multimodal_symbolic_loss import MultiModalSymbolicAlignment, MultiModalSymbolicAlignmentTriple
 except ModuleNotFoundError:  # repo-root execution
     from symalign.encoder import SmallMaskEncoder
     from symalign.prior import EMAStats
     from symalign.symbolic_loss import SymbolicAlignment
     from symalign.multimodal_encoder import MultiModalConfig, MultiModalSymbolicEncoder
-    from symalign.multimodal_symbolic_loss import MultiModalSymbolicAlignment
+    from symalign.multimodal_symbolic_loss import MultiModalSymbolicAlignment, MultiModalSymbolicAlignmentTriple
 
 
 def load_ckpt_flex(model: nn.Module, ckpt_path: str, map_location: str) -> None:
@@ -277,6 +277,16 @@ def main() -> None:
         choices=["fused", "mask", "image"],
         help="Which multi-modal output to align in symbolic loss (ablation): fused|mask|image.",
     )
+    parser.add_argument(
+        "--multimodal_prior_mode",
+        type=str,
+        default="single",
+        choices=["single", "triple"],
+        help="If multimodal: align a single stream (single) or maintain 3 priors and align fused+mask+image (triple).",
+    )
+    parser.add_argument("--multimodal_w_fused", type=float, default=1.0)
+    parser.add_argument("--multimodal_w_mask", type=float, default=0.5)
+    parser.add_argument("--multimodal_w_image", type=float, default=0.5)
     parser.add_argument("--symbolic_lambda", type=float, default=0.1)
     parser.add_argument("--symbolic_warmup_steps", type=int, default=100)
     parser.add_argument("--symbolic_ema_momentum", type=float, default=0.99)
@@ -403,6 +413,7 @@ def main() -> None:
 
     sym_mask: SymbolicAlignment | None = None
     sym_mm: MultiModalSymbolicAlignment | None = None
+    sym_mm3: MultiModalSymbolicAlignmentTriple | None = None
     if args.use_symbolic:
         if args.symbolic_mode == "mask":
             if not args.symbolic_ckpt:
@@ -459,22 +470,49 @@ def main() -> None:
 
             # Rebuild the multimodal encoder and load weights.
             mask_enc = SmallMaskEncoder(in_ch=2, embed_dim=embed_dim, width=mask_width)
-            mm = MultiModalSymbolicEncoder(mask_encoder=mask_enc, cfg=MultiModalConfig(embed_dim=embed_dim, mask_width=mask_width, image_width=image_width, fusion=fusion))
+            mm_cfg = MultiModalConfig(
+                embed_dim=embed_dim,
+                mask_width=mask_width,
+                image_width=image_width,
+                fusion=fusion,
+                image_encoder=str(cfg_d.get("image_encoder", "small_cnn")),
+                image_weights=str(cfg_d.get("image_weights", "none")),
+            )
+            mm = MultiModalSymbolicEncoder(mask_encoder=mask_enc, cfg=mm_cfg)
             mm.load_state_dict(state, strict=False)
             mm = mm.to(device).eval()
             for p in mm.parameters():
                 p.requires_grad_(False)
 
-            sym_mm = MultiModalSymbolicAlignment(
-                encoder=mm,
-                ema_global=EMAStats(dim=embed_dim, momentum=args.symbolic_ema_momentum),
-                ema_boundary=EMAStats(dim=embed_dim, momentum=args.symbolic_ema_momentum),
-                output=args.multimodal_output,
-            )
-            print(
-                f"[Symbolic:multimodal] enabled ckpt={args.multimodal_ckpt} output={args.multimodal_output} lambda={args.symbolic_lambda} "
-                f"warmup={args.symbolic_warmup_steps} ema_m={args.symbolic_ema_momentum} conf_thr={args.symbolic_conf_thr}"
-            )
+            if args.multimodal_prior_mode == "triple":
+                sym_mm3 = MultiModalSymbolicAlignmentTriple(
+                    encoder=mm,
+                    ema_fused_g=EMAStats(dim=embed_dim, momentum=args.symbolic_ema_momentum),
+                    ema_fused_b=EMAStats(dim=embed_dim, momentum=args.symbolic_ema_momentum),
+                    ema_mask_g=EMAStats(dim=embed_dim, momentum=args.symbolic_ema_momentum),
+                    ema_mask_b=EMAStats(dim=embed_dim, momentum=args.symbolic_ema_momentum),
+                    ema_img_g=EMAStats(dim=embed_dim, momentum=args.symbolic_ema_momentum),
+                    ema_img_b=EMAStats(dim=embed_dim, momentum=args.symbolic_ema_momentum),
+                    w_fused=args.multimodal_w_fused,
+                    w_mask=args.multimodal_w_mask,
+                    w_image=args.multimodal_w_image,
+                )
+                print(
+                    f"[Symbolic:multimodal3] enabled ckpt={args.multimodal_ckpt} "
+                    f"w(fused,mask,image)=({args.multimodal_w_fused},{args.multimodal_w_mask},{args.multimodal_w_image}) "
+                    f"lambda={args.symbolic_lambda} warmup={args.symbolic_warmup_steps} ema_m={args.symbolic_ema_momentum} conf_thr={args.symbolic_conf_thr}"
+                )
+            else:
+                sym_mm = MultiModalSymbolicAlignment(
+                    encoder=mm,
+                    ema_global=EMAStats(dim=embed_dim, momentum=args.symbolic_ema_momentum),
+                    ema_boundary=EMAStats(dim=embed_dim, momentum=args.symbolic_ema_momentum),
+                    output=args.multimodal_output,
+                )
+                print(
+                    f"[Symbolic:multimodal] enabled ckpt={args.multimodal_ckpt} output={args.multimodal_output} lambda={args.symbolic_lambda} "
+                    f"warmup={args.symbolic_warmup_steps} ema_m={args.symbolic_ema_momentum} conf_thr={args.symbolic_conf_thr}"
+                )
 
     model.train()
     step = 0
@@ -523,9 +561,11 @@ def main() -> None:
         if args.fg_prior_weight and args.fg_prior_weight > 0:
             loss = loss + float(args.fg_prior_weight) * fg_fraction_prior(lw, lw_t)
 
-        if (sym_mask is not None or sym_mm is not None) and step >= args.symbolic_warmup_steps:
+        if (sym_mask is not None or sym_mm is not None or sym_mm3 is not None) and step >= args.symbolic_warmup_steps:
             p = torch.sigmoid(lw)
-            if sym_mm is not None:
+            if sym_mm3 is not None:
+                fused, mask, image = sym_mm3.compute_all_embeddings(xw, p)
+            elif sym_mm is not None:
                 z_g, z_b = sym_mm.compute_embeddings(xw, p)
             else:
                 z_g, z_b = sym_mask.compute_embeddings(p)  # type: ignore[union-attr]
@@ -535,7 +575,10 @@ def main() -> None:
             ok = conf >= args.symbolic_conf_thr
 
             # initialize priors on first usable batch
-            if sym_mm is not None:
+            if sym_mm3 is not None:
+                sym_mm3.update_priors(fused, mask, image, ok)
+                priors_ready = sym_mm3.priors_ready()
+            elif sym_mm is not None:
                 sym_mm.update_priors(z_g, z_b, ok)
                 priors_ready = sym_mm.ema_global.mean is not None
             else:
@@ -544,7 +587,9 @@ def main() -> None:
 
             # only apply loss once priors exist
             if priors_ready:
-                if sym_mm is not None:
+                if sym_mm3 is not None:
+                    loss = loss + float(args.symbolic_lambda) * sym_mm3.loss(fused, mask, image)
+                elif sym_mm is not None:
                     loss = loss + float(args.symbolic_lambda) * sym_mm.loss(z_g, z_b)
                 else:
                     loss = loss + float(args.symbolic_lambda) * sym_mask.loss(z_g, z_b)  # type: ignore[union-attr]

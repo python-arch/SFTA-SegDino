@@ -207,7 +207,9 @@ python tools/train_multimodal_encoder.py \
   --out_w 256 \
   --boundary_width 2 \
   --embed_dim 64 \
+  --image_encoder small_cnn \
   --image_width 32 \
+  --image_weights none \
   --fusion mlp
 ```
 
@@ -232,6 +234,10 @@ python tools/adapt_baselines.py \
   --symbolic_mode multimodal \
   --multimodal_ckpt ./runs/symalign_multimodal_encoder_kvasir/encoder_final.pth \
   --multimodal_output fused \
+  --multimodal_prior_mode triple \
+  --multimodal_w_fused 1.0 \
+  --multimodal_w_mask 0.5 \
+  --multimodal_w_image 0.5 \
   --symbolic_lambda 0.1 \
   --symbolic_warmup_steps 150 \
   --symbolic_ema_momentum 0.99 \
@@ -240,6 +246,23 @@ python tools/adapt_baselines.py \
   --dino_ckpt <dinov3_weights.pth> \
   --repo_dir <dinov3_repo_dir> \
   --out_csv ./runs/adapt_symbolic_multimodal_none_mixed_ops4_S4.csv
+```
+
+Evaluate the multi-modal encoder invariance (two-view retrieval on the source split):
+```bash
+python tools/eval_multimodal_encoder.py \
+  --dataset_root ./segdata/kvasir \
+  --split train \
+  --img_dir_name images \
+  --mask_dir_name masks \
+  --ckpt ./runs/symalign_multimodal_encoder_kvasir/encoder_final.pth \
+  --batch_size 32 \
+  --num_workers 4 \
+  --max_items 512 \
+  --seed 42 \
+  --out_h 256 \
+  --out_w 256 \
+  --boundary_width 2
 ```
 
 ## Current findings (high-level)

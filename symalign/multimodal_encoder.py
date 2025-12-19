@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Tuple
+from typing import Any, Tuple
 
 import torch
 import torch.nn as nn
@@ -39,6 +39,47 @@ class SmallImageEncoder(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         z = self.net(x)
+        z = self.head(z)
+        return F.normalize(z, dim=-1)
+
+class TorchvisionImageEncoder(nn.Module):
+    """
+    Torchvision backbone that returns a pooled embedding.
+
+    Supports offline-safe initialization:
+    - weights=None (default) never triggers downloads.
+    - weights="imagenet" attempts torchvision default weights; if unavailable, caller should catch and retry.
+    """
+
+    def __init__(self, backbone: str = "resnet18", embed_dim: int = 64, weights: Any = None) -> None:
+        super().__init__()
+        import torchvision.models as models
+
+        backbone = backbone.lower()
+        if backbone == "resnet18":
+            model = models.resnet18(weights=weights)
+            feat_dim = 512
+            self.features = nn.Sequential(*list(model.children())[:-1])  # (B,512,1,1)
+        elif backbone == "resnet34":
+            model = models.resnet34(weights=weights)
+            feat_dim = 512
+            self.features = nn.Sequential(*list(model.children())[:-1])
+        elif backbone == "mobilenet_v3_small":
+            model = models.mobilenet_v3_small(weights=weights)
+            feat_dim = model.classifier[0].in_features
+            self.features = nn.Sequential(model.features, nn.AdaptiveAvgPool2d(1))  # (B,C,1,1)
+        else:
+            raise ValueError(f"Unsupported torchvision backbone: {backbone}")
+
+        self.head = nn.Sequential(
+            nn.Flatten(),
+            nn.Linear(feat_dim, 128),
+            nn.ReLU(inplace=True),
+            nn.Linear(128, embed_dim),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        z = self.features(x)
         z = self.head(z)
         return F.normalize(z, dim=-1)
 
@@ -84,7 +125,9 @@ class FusionAttention(nn.Module):
 class MultiModalConfig:
     embed_dim: int = 64
     mask_width: int = 32
-    image_width: int = 32
+    image_encoder: str = "small_cnn"  # small_cnn|resnet18|resnet34|mobilenet_v3_small
+    image_width: int = 32  # used only for small_cnn
+    image_weights: str = "none"  # none|imagenet
     fusion: str = "mlp"  # mlp|attn
 
 
@@ -97,7 +140,29 @@ class MultiModalSymbolicEncoder(nn.Module):
     def __init__(self, mask_encoder: SmallMaskEncoder, cfg: MultiModalConfig) -> None:
         super().__init__()
         self.mask_encoder = mask_encoder
-        self.image_encoder = SmallImageEncoder(embed_dim=cfg.embed_dim, width=cfg.image_width)
+        if cfg.image_encoder == "small_cnn":
+            self.image_encoder = SmallImageEncoder(embed_dim=cfg.embed_dim, width=cfg.image_width)
+        else:
+            weights_obj = None
+            if cfg.image_weights == "imagenet":
+                # Avoid forcing downloads in restricted environments; fall back to random init if weights are unavailable.
+                try:
+                    import torchvision.models as models
+
+                    if cfg.image_encoder == "resnet18":
+                        weights_obj = models.ResNet18_Weights.DEFAULT
+                    elif cfg.image_encoder == "resnet34":
+                        weights_obj = models.ResNet34_Weights.DEFAULT
+                    elif cfg.image_encoder == "mobilenet_v3_small":
+                        weights_obj = models.MobileNet_V3_Small_Weights.DEFAULT
+                except Exception:
+                    weights_obj = None
+
+            self.image_encoder = TorchvisionImageEncoder(
+                backbone=cfg.image_encoder,
+                embed_dim=cfg.embed_dim,
+                weights=weights_obj,
+            )
         if cfg.fusion == "attn":
             self.fusion = FusionAttention(embed_dim=cfg.embed_dim)
         else:

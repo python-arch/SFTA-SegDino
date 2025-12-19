@@ -25,11 +25,15 @@ Out of scope (Phase-2):
   - `ImageRegionEncoder` (appearance descriptor from masked image region)
   - `MultiModalSymbolicEncoder` (wraps mask encoder + image encoder + fusion)
   - `Fusion` module (start simple; attention weights optional)
+- `symalign/multimodal_symbolic_loss.py`
+  - supports **single-stream** alignment (fused/mask/image) and **triple-prior** alignment (fused+mask+image) with separate EMA stats
 - `symalign/multimodal_loss.py`
   - multi-objective contrastive: intra-mask, intra-image, cross-modal, fused consistency
 - `tools/train_multimodal_encoder.py`
   - trains multi-modal encoder on source train split (images + GT masks)
   - writes `runs/symalign_multimodal_encoder_kvasir/encoder_final.pth`
+- `tools/eval_multimodal_encoder.py`
+  - encoder sanity check: two-view retrieval / invariance for fused/mask/image streams
 - `tools/adapt_baselines.py`
   - add CLI flags to switch symbolic encoder type:
     - `--symbolic_mode mask` (current)
@@ -52,7 +56,8 @@ Loss components:
 ### Stage A: encoder sanity (source-side)
 1. Train encoder on `train/` (images + GT masks).
 2. Validate embeddings qualitatively:
-   - nearest-neighbor retrieval (same mask under aug)
+   - two-view top-1 retrieval (same sample id under aug)
+   - positive vs negative cosine gap (quick separability proxy)
    - optionally UMAP of descriptors colored by mask area / complexity.
 
 ### Stage B: target adaptation stress test (primary)
@@ -88,7 +93,27 @@ PYTHONPATH="$(pwd)" python tools/train_multimodal_encoder.py \
   --num_workers 4 \
   --out_h 256 \
   --out_w 256 \
-  --embed_dim 64
+  --embed_dim 64 \
+  --image_encoder small_cnn \
+  --image_weights none \
+  --fusion mlp
+```
+
+Evaluate encoder invariance (two-view retrieval):
+```bash
+PYTHONPATH="$(pwd)" python tools/eval_multimodal_encoder.py \
+  --dataset_root ./segdata/kvasir \
+  --split train \
+  --img_dir_name images \
+  --mask_dir_name masks \
+  --ckpt ./runs/symalign_multimodal_encoder_kvasir/encoder_final.pth \
+  --batch_size 32 \
+  --num_workers 4 \
+  --max_items 512 \
+  --seed 42 \
+  --out_h 256 \
+  --out_w 256 \
+  --boundary_width 2
 ```
 
 Adaptation run (stress regime, TENT core, multimodal symbolic):
@@ -111,6 +136,10 @@ PYTHONPATH="$(pwd)" python tools/adapt_baselines.py \
   --use_symbolic \
   --symbolic_mode multimodal \
   --multimodal_ckpt ./runs/symalign_multimodal_encoder_kvasir/encoder_final.pth \
+  --multimodal_prior_mode triple \
+  --multimodal_w_fused 1.0 \
+  --multimodal_w_mask 0.5 \
+  --multimodal_w_image 0.5 \
   --symbolic_lambda 0.1 \
   --symbolic_warmup_steps 150 \
   --symbolic_ema_momentum 0.99 \
@@ -121,4 +150,3 @@ PYTHONPATH="$(pwd)" python tools/adapt_baselines.py \
   --repo_dir /absolute/path/to/dinov3_repo_dir \
   --out_csv ./runs/adapt_symbolic_multimodal_none_mixed_ops4_S4.csv
 ```
-
