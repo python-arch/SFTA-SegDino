@@ -155,8 +155,8 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--data_dir", type=str, default="./segdata")
     parser.add_argument("--dataset", type=str, default="tn3k")
-    parser.add_argument("--img_ext", type=str, default=".png")
-    parser.add_argument("--mask_ext", type=str, default=".png")
+    parser.add_argument("--img_ext", type=str, default=".jpg")
+    parser.add_argument("--mask_ext", type=str, default=".jpg")
     parser.add_argument("--epochs", type=int, default=50)
     parser.add_argument("--batch_size", type=int, default=8)
     parser.add_argument("--seed", type=int, default=42)
@@ -199,16 +199,23 @@ def main():
     else:
         backbone = torch.hub.load(args.repo_dir, 'dinov3_vits16', source='local', weights=args.dino_ckpt)
 
-    from dpt import DPT
+    try:
+        from segdino.dpt import DPT
+    except ModuleNotFoundError:
+        from dpt import DPT
     model = DPT(nclass=1, backbone=backbone)
     device = "cuda" if torch.cuda.is_available() else "cpu"
     model = model.to(device)
+    model.lock_backbone() # added (not in the original repo)
     optimizer = torch.optim.AdamW(
         filter(lambda p: p.requires_grad, model.parameters()),
         lr=args.lr, weight_decay=args.weight_decay
     )
 
-    from dataset import FolderDataset, ResizeAndNormalize
+    try:
+        from segdino.dataset import FolderDataset, ResizeAndNormalize
+    except ModuleNotFoundError:
+        from dataset import FolderDataset, ResizeAndNormalize
     root = os.path.join(args.data_dir, args.dataset)
 
     train_transform = ResizeAndNormalize(size=(args.input_h, args.input_w))

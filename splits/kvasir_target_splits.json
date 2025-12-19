@@ -1,0 +1,16 @@
+{
+  "dataset_root": "/home/ahmedjaheen/SegDino/segdino/segdata/kvasir",
+  "base_split": "test",
+  "img_dir_name": "images",
+  "mask_dir_name": "masks",
+  "seed": 42,
+  "holdout_ratio": 0.2,
+  "num_total": 200,
+  "num_adapt": 160,
+  "num_holdout": 40,
+  "manifest_adapt": "kvasir_target_adapt.txt",
+  "manifest_holdout": "kvasir_target_holdout.txt",
+  "sha256_adapt": "f5ac4afd690af6b33a6e6d74e29241face75faf8306733bff70ed363b0d69e7f",
+  "sha256_holdout": "5758771f5e54ca7f3ffa8ff2d48f37f19105001f2facc026d554a00211f4bad6",
+  "created_at_utc": "2025-12-18T20:13:57.181850+00:00"
+}
