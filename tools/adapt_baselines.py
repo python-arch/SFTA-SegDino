@@ -14,22 +14,22 @@ import torch.nn.functional as F
 from torch import nn
 from torch.utils.data import DataLoader
 
-from adapters import LoRASpec, SALTSpec, apply_peft_to_backbone, count_parameters
-from corruption_transform import CorruptionTransform
-from corruptions import CorruptionSpec, MixedCorruptionSpec
-from data import (
+from segdino.adapters import LoRASpec, SALTSpec, apply_peft_to_backbone, count_parameters
+from segdino.corruption_transform import CorruptionTransform
+from segdino.corruptions import CorruptionSpec, MixedCorruptionSpec
+from segdino.data import (
     ManifestConsistencyDataset,
     ManifestSegmentationDataset,
     ResizeAndNormalize,
     collate_seg_samples,
     collate_seg_views_samples,
 )
-from metrics import RunningStats, boundary_fscore, dice_iou_binary, hd95_binary
-from views import WeakStrongViewTransform
+from segdino.metrics import RunningStats, boundary_fscore, dice_iou_binary, hd95_binary
+from segdino.views import WeakStrongViewTransform
 
-from symalign.encoder import SmallMaskEncoder
-from symalign.prior import EMAStats
-from symalign.symbolic_loss import SymbolicAlignment
+from segdino.symalign.encoder import SmallMaskEncoder
+from segdino.symalign.prior import EMAStats
+from segdino.symalign.symbolic_loss import SymbolicAlignment
 
 
 def load_ckpt_flex(model: nn.Module, ckpt_path: str, map_location: str) -> None:
@@ -244,7 +244,7 @@ def main() -> None:
         backbone = torch.hub.load(args.repo_dir, "dinov3_vits16", source="local", weights=args.dino_ckpt)
         encoder_size = "small"
 
-    from dpt import DPT
+    from segdino.dpt import DPT
 
     model = DPT(encoder_size=encoder_size, nclass=1, backbone=backbone).to(device)
     load_ckpt_flex(model, args.ckpt, map_location=device)
@@ -347,7 +347,10 @@ def main() -> None:
     if args.use_symbolic:
         if not args.symbolic_ckpt:
             raise ValueError("--use_symbolic requires --symbolic_ckpt")
-        obj = torch.load(args.symbolic_ckpt, map_location=device)
+        try:
+            obj = torch.load(args.symbolic_ckpt, map_location=device, weights_only=True)
+        except TypeError:
+            obj = torch.load(args.symbolic_ckpt, map_location=device)
         if isinstance(obj, dict) and "state_dict" in obj:
             state = obj["state_dict"]
             enc_args = obj.get("args", {}) if isinstance(obj.get("args", {}), dict) else {}

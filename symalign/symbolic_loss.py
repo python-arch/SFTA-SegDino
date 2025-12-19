@@ -8,9 +8,9 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-from symalign.encoder import SmallMaskEncoder
-from symalign.masks import boundary_band
-from symalign.prior import EMAStats, robust_huber
+from segdino.symalign.encoder import SmallMaskEncoder
+from segdino.symalign.masks import boundary_band
+from segdino.symalign.prior import EMAStats, robust_huber
 
 
 def boundary_from_prob(p: torch.Tensor, width: int = 2) -> torch.Tensor:
