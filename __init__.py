@@ -1,2 +1,2 @@
-"""Internal library for segmentation experiments (data, corruptions, adapters, metrics)."""
+"""Top-level utilities and scripts for this repository."""
 

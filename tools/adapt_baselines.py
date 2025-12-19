@@ -14,18 +14,22 @@ import torch.nn.functional as F
 from torch import nn
 from torch.utils.data import DataLoader
 
-from segdino.adapters import LoRASpec, SALTSpec, apply_peft_to_backbone, count_parameters
-from segdino.corruption_transform import CorruptionTransform
-from segdino.corruptions import CorruptionSpec, MixedCorruptionSpec
-from segdino.data import (
+from adapters import LoRASpec, SALTSpec, apply_peft_to_backbone, count_parameters
+from corruption_transform import CorruptionTransform
+from corruptions import CorruptionSpec, MixedCorruptionSpec
+from data import (
     ManifestConsistencyDataset,
     ManifestSegmentationDataset,
     ResizeAndNormalize,
     collate_seg_samples,
     collate_seg_views_samples,
 )
-from segdino.metrics import RunningStats, boundary_fscore, dice_iou_binary, hd95_binary
-from segdino.views import WeakStrongViewTransform
+from metrics import RunningStats, boundary_fscore, dice_iou_binary, hd95_binary
+from views import WeakStrongViewTransform
+
+from symalign.encoder import SmallMaskEncoder
+from symalign.prior import EMAStats
+from symalign.symbolic_loss import SymbolicAlignment
 
 
 def load_ckpt_flex(model: nn.Module, ckpt_path: str, map_location: str) -> None:
@@ -215,6 +219,14 @@ def main() -> None:
     parser.add_argument("--salt_r_lora", type=int, default=8)
     parser.add_argument("--salt_seed", type=int, default=42)
 
+    # Symbolic alignment (learned E_theta + EMA priors)
+    parser.add_argument("--use_symbolic", action="store_true", help="Enable learned-symbolic alignment loss.")
+    parser.add_argument("--symbolic_ckpt", type=str, default=None, help="Path to trained E_theta checkpoint (.pth).")
+    parser.add_argument("--symbolic_lambda", type=float, default=0.1)
+    parser.add_argument("--symbolic_warmup_steps", type=int, default=100)
+    parser.add_argument("--symbolic_ema_momentum", type=float, default=0.99)
+    parser.add_argument("--symbolic_conf_thr", type=float, default=0.9, help="Image-level confidence gate for updating EMA priors.")
+
     parser.add_argument("--ckpt", type=str, required=True)
     parser.add_argument("--dino_ckpt", type=str, required=True)
     parser.add_argument("--dino_size", type=str, default="s", choices=["b", "s"])
@@ -232,7 +244,7 @@ def main() -> None:
         backbone = torch.hub.load(args.repo_dir, "dinov3_vits16", source="local", weights=args.dino_ckpt)
         encoder_size = "small"
 
-    from segdino.dpt import DPT
+    from dpt import DPT
 
     model = DPT(encoder_size=encoder_size, nclass=1, backbone=backbone).to(device)
     load_ckpt_flex(model, args.ckpt, map_location=device)
@@ -331,6 +343,33 @@ def main() -> None:
 
     optimizer = torch.optim.AdamW(params, lr=args.lr, weight_decay=args.weight_decay)
 
+    sym: SymbolicAlignment | None = None
+    if args.use_symbolic:
+        if not args.symbolic_ckpt:
+            raise ValueError("--use_symbolic requires --symbolic_ckpt")
+        obj = torch.load(args.symbolic_ckpt, map_location=device)
+        if isinstance(obj, dict) and "state_dict" in obj:
+            state = obj["state_dict"]
+            enc_args = obj.get("args", {}) if isinstance(obj.get("args", {}), dict) else {}
+        else:
+            state = obj
+            enc_args = {}
+
+        embed_dim = int(enc_args.get("embed_dim", 64))
+        width = int(enc_args.get("width", 32))
+
+        enc = SmallMaskEncoder(in_ch=2, embed_dim=embed_dim, width=width)
+        enc.load_state_dict(state, strict=False)
+        enc = enc.to(device).eval()
+        for p in enc.parameters():
+            p.requires_grad_(False)
+
+        sym = SymbolicAlignment(
+            encoder=enc,
+            ema_global=EMAStats(dim=embed_dim, momentum=args.symbolic_ema_momentum),
+            ema_boundary=EMAStats(dim=embed_dim, momentum=args.symbolic_ema_momentum),
+        )
+
     model.train()
     step = 0
     used_frac_ema = None
@@ -374,6 +413,24 @@ def main() -> None:
             loss = entropy_loss_from_logits(lw) + args.teacher_kl_weight * kl_to_teacher(lw, lw_t)
         else:
             raise ValueError(f"Unknown method: {args.method}")
+
+        if sym is not None and step >= args.symbolic_warmup_steps:
+            p = torch.sigmoid(lw)
+            z_g, z_b = sym.compute_embeddings(p)
+
+            # image-level confidence gate for updating priors
+            conf = torch.maximum(p, 1.0 - p).mean(dim=(1, 2, 3))
+            ok = conf >= args.symbolic_conf_thr
+
+            # initialize priors on first usable batch
+            if sym.ema_global.mean is None and ok.any():
+                sym.update_priors(z_g, z_b, ok)
+            else:
+                sym.update_priors(z_g, z_b, ok)
+
+            # only apply loss once priors exist
+            if sym.ema_global.mean is not None:
+                loss = loss + float(args.symbolic_lambda) * sym.loss(z_g, z_b)
 
         loss.backward()
         optimizer.step()

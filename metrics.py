@@ -171,4 +171,3 @@ class RunningStats:
             "empty_rate": float(self.n_empty_pred / denom),
             "full_rate": float(self.n_full_pred / denom),
         }
-

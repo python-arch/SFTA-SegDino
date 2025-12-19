@@ -277,6 +277,7 @@ Validation:
 4. Stage 4 (`E_θ` training) — train once and freeze.
 5. Stage 7 (symbolic EMA + alignment) — implement full method + causality ablations.
 6. Stage 8–10 (metrics, orchestration, paper artifacts).
+7. Stage 5b (SALT-family symbolic-aligned variants) — only after `E_θ` + `L_sym` are working end-to-end.
 
 ## Implementation status (what exists in code now)
 This section is a living checklist to keep the plan synchronized with what is actually implemented in the repo.
@@ -319,10 +320,35 @@ This section is a living checklist to keep the plan synchronized with what is ac
 ### In progress / next
 - Stage 5 (pluggable PEFT adapter framework + budget matching)
   - Implement adapter registry + LoRA/SALT knobs in a shared module (avoid duplicating logic between scripts/tools).
+- Stage 5b (symbolically-aligned SALT-like variants)
+  - Implement three SALT-family variants (as ablations) under a unified interface:
+    - `SALT-G`: symbolic-gradient gated update subspace (layer/component selection driven by `L_sym` signal)
+    - `SALT-S/A`: spectrum split into “structure” vs “appearance” components with separate loss coupling
+    - `SALT-Dial`: per-layer scalar dial(s) controlling adaptation strength, supervised/regularized by `L_sym`
+  - Add config knobs to toggle these variants and log their additional parameters and compute.
 - Stage 4 (`E_θ` learned symbolic encoder pretraining)
   - Implement encoder, mask augmentations, and a training script; save weights under `runs/`.
 - Stage 7 (symbolic EMA priors + two-scale alignment loss)
   - Implement EMA stats, gating, robust distances, and ramp schedule; integrate into adaptation runner.
 
+## Execution order decision (locked)
+We will **not** implement SALT-G / SALT-S/A / SALT-Dial until the symbolic pipeline exists.
+
+Order:
+1) Implement and validate `E_θ` (descriptor learning on source masks).
+2) Implement symbolic EMA priors + two-scale alignment loss (global+boundary) on target.
+3) Demonstrate “Ours works with PEFT plug-and-play” using `{none, LoRA, SALT}`.
+4) Only then implement SALT-family symbolic-aligned variants as ablations (SALT-Dial → SALT-S/A → SALT-G).
+
 ### Notes on repo layout in the cluster
 If the repo is checked out under a parent folder named `segdino` and run as a module (e.g. `python -m segdino.tools.eval_corruption_curve`), keep `PYTHONPATH` set to the repo root and ensure the scripts import from the same package namespace consistently.
+
+## Implementation notes for SALT-family ablations
+To keep this tractable and comparable:
+- All SALT-family variants should share the same injection points (e.g., attention `qkv`/`proj` linears) and the same base parameter budget.
+- We will implement variants as small extensions around a shared SALT module:
+  - `SALT-G`: add a gating mask per layer/component (or per singular index bucket) and drive it with symbolic-loss gradients/statistics (stop-grad where needed).
+  - `SALT-S/A`: explicitly separate “top-k structure” vs “remaining appearance” components; apply `L_sym` only to structure bucket and `L_core` primarily to appearance bucket (or vice versa as an ablation).
+  - `SALT-Dial`: attach per-layer scalar(s) that modulate the effective update (e.g., scale the spectrum modification); include a monotonicity/regularization prior if needed.
+  
+We will keep these as ablations (not all enabled in the main method table) unless one variant consistently dominates.

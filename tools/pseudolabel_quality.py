@@ -11,10 +11,10 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader
 
-from segdino.corruption_transform import CorruptionTransform
-from segdino.corruptions import CorruptionSpec, MixedCorruptionSpec
-from segdino.data import ManifestSegmentationDataset, ResizeAndNormalize, collate_seg_samples
-from segdino.metrics import boundary_fscore, dice_iou_binary, hd95_binary
+from corruption_transform import CorruptionTransform
+from corruptions import CorruptionSpec, MixedCorruptionSpec
+from data import ManifestSegmentationDataset, ResizeAndNormalize, collate_seg_samples
+from metrics import boundary_fscore, dice_iou_binary, hd95_binary
 
 
 def load_ckpt_flex(model: torch.nn.Module, ckpt_path: str, map_location: str) -> None:
@@ -77,7 +77,7 @@ def main() -> None:
         backbone = torch.hub.load(args.repo_dir, "dinov3_vits16", source="local", weights=args.dino_ckpt)
         encoder_size = "small"
 
-    from segdino.dpt import DPT
+    from dpt import DPT
 
     model = DPT(encoder_size=encoder_size, nclass=1, backbone=backbone).to(device)
     load_ckpt_flex(model, args.ckpt, map_location=device)

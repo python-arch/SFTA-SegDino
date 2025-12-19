@@ -74,4 +74,3 @@ class WeakStrongViewTransform:
         weak = self._to_tensor_norm(self.weak_aug(img_pil))
         strong = self._to_tensor_norm(self.strong_aug(img_pil))
         return ViewPair(weak=weak, strong=strong)
-

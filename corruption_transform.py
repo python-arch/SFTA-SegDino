@@ -23,4 +23,3 @@ class CorruptionTransform:
         if isinstance(self.spec, CorruptionSpec):
             return apply_corruption_bgr(img_bgr, image_id=image_id, spec=self.spec)
         return apply_mixed_corruption_bgr(img_bgr, image_id=image_id, spec=self.spec)
-

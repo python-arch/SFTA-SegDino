@@ -125,6 +125,26 @@ Representative results (holdout `n=40`):
 ## Moderate regime baseline (mixed ops2 S4)
 Under `mixed ops2 S4`, all methods are stable and high-performing (Dice ≈0.81–0.84), and `tent` again tends to be best overall.
 
+## PEFT-only baselines (LoRA vs SALT)
+We evaluated PEFT-only baselines (adapter injected into backbone attention linears; ~24 layers wrapped) under the same stabilized adaptation runner.
+
+### Stress regime: mixed ops4 S4
+Key observations:
+- **LoRA** achieved the best Dice among PEFT runs with `entropy` (≈0.742 Dice), and was competitive with TENT.
+- **SALT** achieved similar performance with fewer trainable parameters (≈0.60% trainable vs ≈0.92% for LoRA in the tested configuration), but performance depended more on the choice of core objective (entropy vs consistency/self-train).
+
+Interpretation:
+- PEFT improves or matches the best non-PEFT baselines, but it is not uniformly beneficial across all objectives.
+- The parameter-efficiency of SALT is a credible advantage to emphasize when we move to symbolically aligned reparameterizations.
+
+### Moderate regime: mixed ops2 S4
+Key observations:
+- Both **LoRA** and **SALT** are strong and stable (no collapse).
+- Entropy and TENT remain the most competitive objectives in this moderate regime; self-training tends to underperform.
+
+Interpretation:
+- The PEFT axis appears “plug-and-play” across at least two adapters (LoRA, SALT), supporting the design choice to keep PEFT modular.
+
 ## Practical takeaways for the next stage (learned-symbolic method)
 - The regime `mixed ops4 S4` is sufficiently hard to be a meaningful stress test.
 - We now have stable baselines to beat; **TENT is currently the strongest** on Dice/IoU in this regime.

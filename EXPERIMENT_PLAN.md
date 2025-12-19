@@ -71,6 +71,14 @@ Primary comparisons:
 - LoRA vs SALT under **matched trainable parameter budgets**
 Secondary (optional): other PEFTs (e.g., IA³/adapters/BitFit) as long as parameter budgets are matched.
 
+### Symbolically-aligned reparameterization (SALT-like variants)
+In addition to comparing existing PEFT methods (LoRA/SALT), we will test **symbolically-aligned SALT-like variants** as ablations to understand how reparameterization interacts with symbolic alignment:
+- **SALT-G (symbolic-gradient gated subspace):** use symbolic-loss signals to decide which layers/components update (others frozen).
+- **SALT-S/A (structure vs appearance spectrum split):** partition the singular spectrum into “structure” vs “appearance” components and couple them to different losses (e.g., `L_sym` vs `L_core`).
+- **SALT-Dial (domain dial):** learn a small set of per-layer scalars that modulate adaptation strength; symbolic loss supervises the dial to avoid over-adaptation.
+
+These are treated as **ablation variants** of the reparameterized update space (not new datasets or new supervision).
+
 ## Symbolic Alignment (what “symbolic” means)
 We replace hand-crafted shape/topology statistics with a **learned mask-structure descriptor encoder** `E_θ`.
 
@@ -118,6 +126,10 @@ To avoid “it’s just regularization” critiques, include:
 - **Symbols + safeguards** (full)
 - Global-only (remove boundary descriptor)
 - Boundary-only (remove global descriptor)
+
+Reparameterization ablations (SALT family):
+- SALT baseline vs SALT-G vs SALT-S/A vs SALT-Dial under the same objective/budget
+- Where applicable: disable gating/splitting/dial to isolate effect
 
 Run ablations at least on `S2` and `S4`, plus include in AUSC if feasible.
 
@@ -204,6 +216,12 @@ Phase 4: ours MVP (S4-first)
 Phase 5: ablations + budget curves
 8. Causality ablations on `S2` and `S4`
 9. Budget curves at `S4` + AUSC for LoRA vs SALT (0.1/0.5/1%)
+
+Phase 6: symbolic-aligned reparameterization ablations (SALT variants)
+10. Compare SALT baseline vs SALT-G vs SALT-S/A vs SALT-Dial on:
+   - moderate regime: `mixed ops2 S4`
+   - stress regime: `mixed ops4 S4`
+   - (optional) severity ladder aggregation (AUSC) on `mixed ops4 S2–S4`
 
 Appendix: mixed corruptions; optional “domain dial” (scale adapter strength at inference).
 

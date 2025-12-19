@@ -6,7 +6,7 @@ from pathlib import Path
 
 import cv2
 
-from segdino.corruptions import CorruptionSpec, MixedCorruptionSpec, apply_corruption_bgr, apply_mixed_corruption_bgr
+from corruptions import CorruptionSpec, MixedCorruptionSpec, apply_corruption_bgr, apply_mixed_corruption_bgr
 
 
 def main() -> None:

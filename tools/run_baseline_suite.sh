@@ -107,7 +107,7 @@ for METHOD in "${METHODS[@]}"; do
   echo "[RUN] method=${METHOD} corruption=${CORRUPTION} severity=${SEVERITY} num_ops=${NUM_OPS}"
   echo "============================================================"
 
-  if python -m segdino.tools.adapt_baselines \
+  if python tools/adapt_baselines.py \
     --dataset_root "${DATASET_ROOT}" \
     --adapt_manifest "${ADAPT_MANIFEST}" \
     --eval_manifest "${EVAL_MANIFEST}" \
