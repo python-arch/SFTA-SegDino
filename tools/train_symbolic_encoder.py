@@ -67,12 +67,7 @@ def main() -> None:
         model.train()
         losses = []
         for batch in loader:
-            # batch: list of MaskSample -> default collate gives dict of tensors/lists if dataclass;
-            # we accept either case.
-            if isinstance(batch, dict):
-                x = batch["x"]
-            else:
-                x = batch.x
+            x, _ids = batch  # x: (B,2,H,W); ids are unused for training
 
             b = x.size(0)
             rng = random.Random(args.seed + epoch * 100000 + b)
@@ -103,4 +98,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

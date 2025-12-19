@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional, Tuple
 
@@ -46,12 +45,6 @@ def boundary_band(mask01: np.ndarray, width: int = 2) -> np.ndarray:
     return (grad > 0).astype(np.float32)
 
 
-@dataclass(frozen=True)
-class MaskSample:
-    x: torch.Tensor  # (C,H,W) float
-    id: str
-
-
 class MaskPairDataset(Dataset):
     """
     Loads masks from `dataset_root/train/masks` and produces 2-channel inputs:
@@ -68,11 +61,10 @@ class MaskPairDataset(Dataset):
     def __len__(self) -> int:
         return len(self.paths)
 
-    def __getitem__(self, idx: int) -> MaskSample:
+    def __getitem__(self, idx: int) -> tuple[torch.Tensor, str]:
         p = self.paths[idx]
         m01 = read_mask01(p)
         b01 = boundary_band(m01, width=self.boundary_width)
         x = np.stack([m01, b01], axis=0)  # (2,H,W)
         xt = torch.from_numpy(x).float()
-        return MaskSample(x=xt, id=p.stem)
-
+        return xt, p.stem
