@@ -193,7 +193,7 @@ python tools/adapt_baselines.py \
 ```
 
 ## Direction-4 Pivot: Multi-Modal Symbolic Descriptors (mask + image)
-Train a multi-modal symbolic encoder that fuses mask structure + masked-image appearance:
+Train a multi-modal symbolic encoder that fuses mask structure + feature-pooled appearance (soft region pooling):
 ```bash
 python tools/train_multimodal_encoder.py \
   --dataset_root ./segdata/kvasir \
@@ -207,11 +207,18 @@ python tools/train_multimodal_encoder.py \
   --out_w 256 \
   --boundary_width 2 \
   --embed_dim 64 \
-  --image_encoder small_cnn \
-  --image_width 32 \
-  --image_weights none \
-  --fusion mlp
+  --image_encoder resnet18 \
+  --image_weights auto \
+  --image_pool features \
+  --pool_dilate_px 8 \
+  --fusion uncertainty \
+  --stopgrad_cross \
+  --modality_dropout_p 0.2 \
+  --mask_perturb_p 0.5 \
+  --max_mask_morph_radius 2
 ```
+`--image_weights auto` will fetch ImageNet-pretrained torchvision weights when available and cache them under `~/.cache/symalign_torchvision` (override via `SYALIGN_TORCHVISION_CACHE`).
+If you don’t have `torchvision` installed (or want a fully offline path), use `--image_encoder small_cnn --image_weights none`.
 
 Use it during adaptation:
 ```bash
@@ -238,6 +245,13 @@ python tools/adapt_baselines.py \
   --multimodal_w_fused 1.0 \
   --multimodal_w_mask 0.5 \
   --multimodal_w_image 0.5 \
+  --symbolic_prior_type memory \
+  --symbolic_mem_capacity 1024 \
+  --symbolic_mem_min 64 \
+  --symbolic_outlier_cos 0.1 \
+  --symbolic_min_fg 0.001 \
+  --symbolic_max_fg 0.60 \
+  --symbolic_max_components 6 \
   --symbolic_lambda 0.1 \
   --symbolic_warmup_steps 150 \
   --symbolic_ema_momentum 0.99 \

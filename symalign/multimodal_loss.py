@@ -26,10 +26,17 @@ class MultiModalContrastiveLoss(nn.Module):
     - fused: z_fused(view1) vs z_fused(view2)
     """
 
-    def __init__(self, temperature: float = 0.1, w: MultiModalLossWeights | None = None) -> None:
+    def __init__(
+        self,
+        temperature: float = 0.1,
+        w: MultiModalLossWeights | None = None,
+        *,
+        stopgrad_cross: bool = False,
+    ) -> None:
         super().__init__()
         self.temperature = float(temperature)
         self.w = w or MultiModalLossWeights()
+        self.stopgrad_cross = bool(stopgrad_cross)
 
     def forward(
         self,
@@ -42,7 +49,13 @@ class MultiModalContrastiveLoss(nn.Module):
     ) -> Tuple[torch.Tensor, Dict[str, float]]:
         loss_mask = nt_xent(z_mask_1, z_mask_2, temperature=self.temperature)
         loss_img = nt_xent(z_img_1, z_img_2, temperature=self.temperature)
-        loss_cross = nt_xent(z_mask_1, z_img_1, temperature=self.temperature)
+        if self.stopgrad_cross:
+            # Stabilize cross-modal alignment: one side is a fixed target per term.
+            loss_cross = nt_xent(z_mask_1.detach(), z_img_1, temperature=self.temperature) + nt_xent(
+                z_mask_1, z_img_1.detach(), temperature=self.temperature
+            )
+        else:
+            loss_cross = nt_xent(z_mask_1, z_img_1, temperature=self.temperature)
         loss_fused = nt_xent(z_fused_1, z_fused_2, temperature=self.temperature)
 
         total = (

@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from typing import Optional, Tuple
 
 import torch
+import torch.nn.functional as F
 
 
 @dataclass
@@ -60,3 +61,99 @@ def robust_huber(x: torch.Tensor, delta: float = 1.0) -> torch.Tensor:
     lin = absx - quad
     return (0.5 * quad * quad + delta * lin).mean()
 
+
+class MemoryBank:
+    """
+    Fixed-size ring buffer for normalized embeddings (B,D).
+
+    Intended for guarded priors: compute statistics from a set of admitted embeddings rather than EMA drift.
+    """
+
+    def __init__(self, dim: int, capacity: int = 1024, eps: float = 1e-6) -> None:
+        self.dim = int(dim)
+        self.capacity = int(capacity)
+        self.eps = float(eps)
+        if self.capacity <= 0:
+            raise ValueError("capacity must be > 0")
+        self._buf: Optional[torch.Tensor] = None  # (capacity,D) on CPU
+        self._ptr: int = 0
+        self._full: bool = False
+
+    def size(self) -> int:
+        if self._buf is None:
+            return 0
+        return self.capacity if self._full else self._ptr
+
+    def add(self, z: torch.Tensor) -> None:
+        """
+        z: (B,D) normalized embeddings; stored on CPU float32.
+        """
+        if z.ndim != 2 or z.shape[1] != self.dim:
+            raise ValueError(f"Expected z shape (B,{self.dim}), got {tuple(z.shape)}")
+        if self._buf is None:
+            self._buf = torch.zeros((self.capacity, self.dim), dtype=torch.float32, device="cpu")
+
+        zc = z.detach().to(device="cpu", dtype=torch.float32)
+        b = int(zc.shape[0])
+        if b == 0:
+            return
+
+        # If b >= capacity, keep only the most recent capacity items.
+        if b >= self.capacity:
+            self._buf[:] = zc[-self.capacity :]
+            self._ptr = 0
+            self._full = True
+            return
+
+        end = self._ptr + b
+        if end <= self.capacity:
+            self._buf[self._ptr : end] = zc
+        else:
+            first = self.capacity - self._ptr
+            self._buf[self._ptr :] = zc[:first]
+            self._buf[: end - self.capacity] = zc[first:]
+            self._full = True
+        self._ptr = end % self.capacity
+        if self._ptr == 0 and b > 0:
+            self._full = True
+
+    def get(self) -> torch.Tensor:
+        """
+        Returns current embeddings (N,D) on CPU.
+        """
+        if self._buf is None:
+            return torch.empty((0, self.dim), dtype=torch.float32, device="cpu")
+        if self._full:
+            return self._buf
+        return self._buf[: self._ptr]
+
+    def mean_var(self) -> Tuple[torch.Tensor, torch.Tensor]:
+        z = self.get()
+        if z.numel() == 0:
+            raise RuntimeError("MemoryBank is empty.")
+        mean = z.mean(dim=0)
+        var = z.var(dim=0, unbiased=False)
+        return mean, var
+
+    def zscore(self, z: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        mean, var = self.mean_var()
+        mean = mean.to(device=z.device, dtype=z.dtype)
+        var = var.to(device=z.device, dtype=z.dtype)
+        std = torch.sqrt(var + self.eps)
+        return (z - mean) / std, mean, std
+
+    def proto(self, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
+        """
+        Normalized mean prototype (D,) on given device/dtype.
+        """
+        mean, _ = self.mean_var()
+        p = mean.to(device=device, dtype=dtype)
+        return F.normalize(p, dim=0)
+
+    def cosine_sim(self, z: torch.Tensor) -> torch.Tensor:
+        """
+        z: (B,D) normalized
+        Returns: (B,) cosine similarity to the normalized prototype.
+        """
+        proto = self.proto(device=z.device, dtype=z.dtype).view(1, -1)
+        return (z * proto).sum(dim=-1)

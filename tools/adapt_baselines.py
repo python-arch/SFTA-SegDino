@@ -43,16 +43,26 @@ except ModuleNotFoundError:  # repo-root execution (no segdino package wrapper)
 
 try:
     from segdino.symalign.encoder import SmallMaskEncoder
-    from segdino.symalign.prior import EMAStats
+    from segdino.symalign.prior import EMAStats, MemoryBank
     from segdino.symalign.symbolic_loss import SymbolicAlignment
     from segdino.symalign.multimodal_encoder import MultiModalConfig, MultiModalSymbolicEncoder
-    from segdino.symalign.multimodal_symbolic_loss import MultiModalSymbolicAlignment, MultiModalSymbolicAlignmentTriple
+    from segdino.symalign.multimodal_symbolic_loss import (
+        MultiModalSymbolicAlignment,
+        MultiModalSymbolicAlignmentMemory,
+        MultiModalSymbolicAlignmentTriple,
+        MultiModalSymbolicAlignmentTripleMemory,
+    )
 except ModuleNotFoundError:  # repo-root execution
     from symalign.encoder import SmallMaskEncoder
-    from symalign.prior import EMAStats
+    from symalign.prior import EMAStats, MemoryBank
     from symalign.symbolic_loss import SymbolicAlignment
     from symalign.multimodal_encoder import MultiModalConfig, MultiModalSymbolicEncoder
-    from symalign.multimodal_symbolic_loss import MultiModalSymbolicAlignment, MultiModalSymbolicAlignmentTriple
+    from symalign.multimodal_symbolic_loss import (
+        MultiModalSymbolicAlignment,
+        MultiModalSymbolicAlignmentMemory,
+        MultiModalSymbolicAlignmentTriple,
+        MultiModalSymbolicAlignmentTripleMemory,
+    )
 
 
 def load_ckpt_flex(model: nn.Module, ckpt_path: str, map_location: str) -> None:
@@ -129,6 +139,53 @@ def fg_fraction_prior(student_logits: torch.Tensor, teacher_logits: torch.Tensor
     fs = ps.mean()
     ft = pt.mean()
     return F.mse_loss(fs, ft)
+
+def _count_components_cv2(mask01: torch.Tensor) -> int:
+    """
+    mask01: (H,W) bool/float on CPU
+    Returns number of connected components in the foreground (excluding background), or -1 if unavailable.
+    """
+    try:
+        import cv2  # type: ignore
+    except Exception:
+        return -1
+    m = mask01.detach().cpu().numpy()
+    m = (m > 0.5).astype("uint8")
+    n, _labels = cv2.connectedComponents(m, connectivity=8)
+    return int(max(0, n - 1))
+
+
+def symbolic_ok_mask(
+    p: torch.Tensor,
+    *,
+    conf_thr: float,
+    min_fg: float,
+    max_fg: float,
+    max_components: int,
+) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
+    """
+    p: (B,1,H,W) probability map.
+    Returns:
+      ok: (B,) bool admission gate
+      stats: basic diagnostics tensors (B,)
+    """
+    conf = torch.maximum(p, 1.0 - p).mean(dim=(1, 2, 3))
+    hard = (p > 0.5).float()
+    fg_frac = hard.mean(dim=(1, 2, 3))
+
+    ok = conf >= float(conf_thr)
+    ok = ok & (fg_frac >= float(min_fg)) & (fg_frac <= float(max_fg))
+
+    comps_list = []
+    if max_components and int(max_components) > 0:
+        for i in range(p.size(0)):
+            comps_list.append(_count_components_cv2(hard[i, 0]))
+        comps = torch.tensor(comps_list, device=p.device, dtype=torch.float32)
+        ok = ok & (comps <= float(max_components))
+    else:
+        comps = torch.full_like(conf, -1.0)
+
+    return ok, {"conf": conf, "fg_frac": fg_frac, "components": comps}
 
 
 def consistency_loss(logits_w: torch.Tensor, logits_s: torch.Tensor) -> torch.Tensor:
@@ -291,6 +348,19 @@ def main() -> None:
     parser.add_argument("--symbolic_warmup_steps", type=int, default=100)
     parser.add_argument("--symbolic_ema_momentum", type=float, default=0.99)
     parser.add_argument("--symbolic_conf_thr", type=float, default=0.9, help="Image-level confidence gate for updating EMA priors.")
+    parser.add_argument(
+        "--symbolic_prior_type",
+        type=str,
+        default="ema",
+        choices=["ema", "memory"],
+        help="Prior mechanism for symbolic alignment: EMA stats (ema) or guarded memory bank (memory).",
+    )
+    parser.add_argument("--symbolic_mem_capacity", type=int, default=1024)
+    parser.add_argument("--symbolic_mem_min", type=int, default=32, help="Minimum memory size before outlier gating activates.")
+    parser.add_argument("--symbolic_outlier_cos", type=float, default=0.0, help="Min cosine similarity to memory prototype for admission.")
+    parser.add_argument("--symbolic_min_fg", type=float, default=0.0, help="Min foreground fraction for admission (hard threshold at 0.5).")
+    parser.add_argument("--symbolic_max_fg", type=float, default=1.0, help="Max foreground fraction for admission (hard threshold at 0.5).")
+    parser.add_argument("--symbolic_max_components", type=int, default=0, help="Max connected components for admission (0 disables).")
 
     parser.add_argument("--ckpt", type=str, required=True)
     parser.add_argument("--dino_ckpt", type=str, required=True)
@@ -412,8 +482,8 @@ def main() -> None:
     optimizer = torch.optim.AdamW(params, lr=args.lr, weight_decay=args.weight_decay)
 
     sym_mask: SymbolicAlignment | None = None
-    sym_mm: MultiModalSymbolicAlignment | None = None
-    sym_mm3: MultiModalSymbolicAlignmentTriple | None = None
+    sym_mm: MultiModalSymbolicAlignment | MultiModalSymbolicAlignmentMemory | None = None
+    sym_mm3: MultiModalSymbolicAlignmentTriple | MultiModalSymbolicAlignmentTripleMemory | None = None
     if args.use_symbolic:
         if args.symbolic_mode == "mask":
             if not args.symbolic_ckpt:
@@ -467,6 +537,10 @@ def main() -> None:
             mask_width = int(cfg_d.get("mask_width", 32))
             image_width = int(cfg_d.get("image_width", 32))
             fusion = str(cfg_d.get("fusion", "mlp"))
+            image_pool = str(cfg_d.get("image_pool", "features"))
+            pool_dilate_px = int(cfg_d.get("pool_dilate_px", 0))
+            use_imagenet_norm = bool(cfg_d.get("use_imagenet_norm", True))
+            gate_hidden = int(cfg_d.get("gate_hidden", 64))
 
             # Rebuild the multimodal encoder and load weights.
             mask_enc = SmallMaskEncoder(in_ch=2, embed_dim=embed_dim, width=mask_width)
@@ -477,6 +551,10 @@ def main() -> None:
                 fusion=fusion,
                 image_encoder=str(cfg_d.get("image_encoder", "small_cnn")),
                 image_weights=str(cfg_d.get("image_weights", "none")),
+                image_pool=image_pool,
+                pool_dilate_px=pool_dilate_px,
+                use_imagenet_norm=use_imagenet_norm,
+                gate_hidden=gate_hidden,
             )
             mm = MultiModalSymbolicEncoder(mask_encoder=mask_enc, cfg=mm_cfg)
             mm.load_state_dict(state, strict=False)
@@ -485,33 +563,59 @@ def main() -> None:
                 p.requires_grad_(False)
 
             if args.multimodal_prior_mode == "triple":
-                sym_mm3 = MultiModalSymbolicAlignmentTriple(
-                    encoder=mm,
-                    ema_fused_g=EMAStats(dim=embed_dim, momentum=args.symbolic_ema_momentum),
-                    ema_fused_b=EMAStats(dim=embed_dim, momentum=args.symbolic_ema_momentum),
-                    ema_mask_g=EMAStats(dim=embed_dim, momentum=args.symbolic_ema_momentum),
-                    ema_mask_b=EMAStats(dim=embed_dim, momentum=args.symbolic_ema_momentum),
-                    ema_img_g=EMAStats(dim=embed_dim, momentum=args.symbolic_ema_momentum),
-                    ema_img_b=EMAStats(dim=embed_dim, momentum=args.symbolic_ema_momentum),
-                    w_fused=args.multimodal_w_fused,
-                    w_mask=args.multimodal_w_mask,
-                    w_image=args.multimodal_w_image,
-                )
+                if args.symbolic_prior_type == "memory":
+                    sym_mm3 = MultiModalSymbolicAlignmentTripleMemory(
+                        encoder=mm,
+                        mem_fused_g=MemoryBank(dim=embed_dim, capacity=args.symbolic_mem_capacity),
+                        mem_fused_b=MemoryBank(dim=embed_dim, capacity=args.symbolic_mem_capacity),
+                        mem_mask_g=MemoryBank(dim=embed_dim, capacity=args.symbolic_mem_capacity),
+                        mem_mask_b=MemoryBank(dim=embed_dim, capacity=args.symbolic_mem_capacity),
+                        mem_img_g=MemoryBank(dim=embed_dim, capacity=args.symbolic_mem_capacity),
+                        mem_img_b=MemoryBank(dim=embed_dim, capacity=args.symbolic_mem_capacity),
+                        w_fused=args.multimodal_w_fused,
+                        w_mask=args.multimodal_w_mask,
+                        w_image=args.multimodal_w_image,
+                        min_size=args.symbolic_mem_min,
+                        min_cos_sim=args.symbolic_outlier_cos,
+                    )
+                else:
+                    sym_mm3 = MultiModalSymbolicAlignmentTriple(
+                        encoder=mm,
+                        ema_fused_g=EMAStats(dim=embed_dim, momentum=args.symbolic_ema_momentum),
+                        ema_fused_b=EMAStats(dim=embed_dim, momentum=args.symbolic_ema_momentum),
+                        ema_mask_g=EMAStats(dim=embed_dim, momentum=args.symbolic_ema_momentum),
+                        ema_mask_b=EMAStats(dim=embed_dim, momentum=args.symbolic_ema_momentum),
+                        ema_img_g=EMAStats(dim=embed_dim, momentum=args.symbolic_ema_momentum),
+                        ema_img_b=EMAStats(dim=embed_dim, momentum=args.symbolic_ema_momentum),
+                        w_fused=args.multimodal_w_fused,
+                        w_mask=args.multimodal_w_mask,
+                        w_image=args.multimodal_w_image,
+                    )
                 print(
-                    f"[Symbolic:multimodal3] enabled ckpt={args.multimodal_ckpt} "
+                    f"[Symbolic:multimodal3] enabled ckpt={args.multimodal_ckpt} prior={args.symbolic_prior_type} "
                     f"w(fused,mask,image)=({args.multimodal_w_fused},{args.multimodal_w_mask},{args.multimodal_w_image}) "
-                    f"lambda={args.symbolic_lambda} warmup={args.symbolic_warmup_steps} ema_m={args.symbolic_ema_momentum} conf_thr={args.symbolic_conf_thr}"
+                    f"lambda={args.symbolic_lambda} warmup={args.symbolic_warmup_steps} conf_thr={args.symbolic_conf_thr}"
                 )
             else:
-                sym_mm = MultiModalSymbolicAlignment(
-                    encoder=mm,
-                    ema_global=EMAStats(dim=embed_dim, momentum=args.symbolic_ema_momentum),
-                    ema_boundary=EMAStats(dim=embed_dim, momentum=args.symbolic_ema_momentum),
-                    output=args.multimodal_output,
-                )
+                if args.symbolic_prior_type == "memory":
+                    sym_mm = MultiModalSymbolicAlignmentMemory(
+                        encoder=mm,
+                        mem_global=MemoryBank(dim=embed_dim, capacity=args.symbolic_mem_capacity),
+                        mem_boundary=MemoryBank(dim=embed_dim, capacity=args.symbolic_mem_capacity),
+                        output=args.multimodal_output,
+                        min_size=args.symbolic_mem_min,
+                        min_cos_sim=args.symbolic_outlier_cos,
+                    )
+                else:
+                    sym_mm = MultiModalSymbolicAlignment(
+                        encoder=mm,
+                        ema_global=EMAStats(dim=embed_dim, momentum=args.symbolic_ema_momentum),
+                        ema_boundary=EMAStats(dim=embed_dim, momentum=args.symbolic_ema_momentum),
+                        output=args.multimodal_output,
+                    )
                 print(
-                    f"[Symbolic:multimodal] enabled ckpt={args.multimodal_ckpt} output={args.multimodal_output} lambda={args.symbolic_lambda} "
-                    f"warmup={args.symbolic_warmup_steps} ema_m={args.symbolic_ema_momentum} conf_thr={args.symbolic_conf_thr}"
+                    f"[Symbolic:multimodal] enabled ckpt={args.multimodal_ckpt} prior={args.symbolic_prior_type} output={args.multimodal_output} lambda={args.symbolic_lambda} "
+                    f"warmup={args.symbolic_warmup_steps} conf_thr={args.symbolic_conf_thr}"
                 )
 
     model.train()
@@ -570,17 +674,26 @@ def main() -> None:
             else:
                 z_g, z_b = sym_mask.compute_embeddings(p)  # type: ignore[union-attr]
 
-            # image-level confidence gate for updating priors
-            conf = torch.maximum(p, 1.0 - p).mean(dim=(1, 2, 3))
-            ok = conf >= args.symbolic_conf_thr
+            # Guarded admission gate for updating priors/memory.
+            ok, _ok_stats = symbolic_ok_mask(
+                p,
+                conf_thr=args.symbolic_conf_thr,
+                min_fg=args.symbolic_min_fg,
+                max_fg=args.symbolic_max_fg,
+                max_components=args.symbolic_max_components,
+            )
 
             # initialize priors on first usable batch
             if sym_mm3 is not None:
-                sym_mm3.update_priors(fused, mask, image, ok)
+                _accepted = sym_mm3.update_priors(fused, mask, image, ok)
                 priors_ready = sym_mm3.priors_ready()
             elif sym_mm is not None:
-                sym_mm.update_priors(z_g, z_b, ok)
-                priors_ready = sym_mm.ema_global.mean is not None
+                if isinstance(sym_mm, MultiModalSymbolicAlignmentMemory):
+                    _accepted = sym_mm.update_priors(z_g, z_b, ok)
+                    priors_ready = sym_mm.priors_ready()
+                else:
+                    sym_mm.update_priors(z_g, z_b, ok)
+                    priors_ready = sym_mm.ema_global.mean is not None
             else:
                 sym_mask.update_priors(z_g, z_b, ok)  # type: ignore[union-attr]
                 priors_ready = sym_mask.ema_global.mean is not None  # type: ignore[union-attr]
