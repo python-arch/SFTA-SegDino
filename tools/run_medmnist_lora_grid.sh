@@ -119,9 +119,13 @@ if [[ "$SKIP_PREFLIGHT" != "true" ]]; then
   fi
 
   python3 - <<'PY'
-import importlib
 mods = ["numpy", "PIL", "torch", "torchvision", "einops", "tqdm", "sklearn"]
-missing = [m for m in mods if importlib.util.find_spec(m) is None]
+missing = []
+for m in mods:
+    try:
+        __import__(m)
+    except Exception:
+        missing.append(m)
 if missing:
     raise SystemExit("Missing Python packages: " + ", ".join(missing))
 print("[ok] Python package preflight passed")
