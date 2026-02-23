@@ -25,7 +25,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from adapters import LoRALinear, count_parameters, inject_lora_with_placement
+from adapters import FusedQKVLoRALinear, LoRALinear, count_parameters, inject_lora_with_placement
 
 
 DATASET_ALIASES: Dict[str, str] = {
@@ -195,6 +195,11 @@ def enable_lora_and_head_trainable(
                     m.lora_A.requires_grad_(True)
                 if isinstance(m.lora_B, torch.Tensor):
                     m.lora_B.requires_grad_(True)
+            if isinstance(m, FusedQKVLoRALinear):
+                for p in m.lora_A.values():
+                    p.requires_grad_(True)
+                for p in m.lora_B.values():
+                    p.requires_grad_(True)
     elif adapter == "none":
         wrapped = 0
     else:

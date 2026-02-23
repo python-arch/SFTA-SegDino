@@ -13,7 +13,13 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from adapters import _match_lora_placement, parse_lora_placement
+from adapters import (
+    FusedQKVLoRALinear,
+    LoRALinear,
+    _match_lora_placement,
+    inject_lora_with_placement,
+    parse_lora_placement,
+)
 
 ATOMIC = ("Q", "K", "V", "P", "F1", "F2")
 
@@ -54,6 +60,15 @@ def main() -> None:
     )
     p.add_argument("--show_names", action="store_true", help="Print matched module names.")
     p.add_argument("--max_names", type=int, default=200, help="Max names printed per combo.")
+    p.add_argument(
+        "--verify_combo",
+        type=str,
+        default="",
+        help="If set (e.g. 'Q' or 'Q,K'), inject LoRA and print actual trainable adapter params.",
+    )
+    p.add_argument("--verify_r", type=int, default=4)
+    p.add_argument("--verify_alpha", type=int, default=16)
+    p.add_argument("--verify_dropout", type=float, default=0.0)
     args = p.parse_args()
 
     repo_dir = Path(args.repo_dir)
@@ -102,6 +117,39 @@ def main() -> None:
             "\n[Note] Q/K/V matched sets are identical. "
             "This usually means fused qkv projections in the backbone."
         )
+
+    if args.verify_combo:
+        verify_combo = args.verify_combo.strip()
+        print(f"\n[Verify injection] combo={verify_combo}")
+        wrapped = inject_lora_with_placement(
+            backbone,
+            r=int(args.verify_r),
+            alpha=int(args.verify_alpha),
+            dropout=float(args.verify_dropout),
+            placement=verify_combo,
+        )
+        lora_wrappers = 0
+        fused_wrappers = 0
+        for m in backbone.modules():
+            if isinstance(m, LoRALinear):
+                lora_wrappers += 1
+            if isinstance(m, FusedQKVLoRALinear):
+                fused_wrappers += 1
+        trainable = [n for n, p in backbone.named_parameters() if p.requires_grad]
+        q_params = [n for n in trainable if ".lora_A.q" in n or ".lora_B.q" in n]
+        k_params = [n for n in trainable if ".lora_A.k" in n or ".lora_B.k" in n]
+        v_params = [n for n in trainable if ".lora_A.v" in n or ".lora_B.v" in n]
+        print(f"  wrapped modules: {wrapped}")
+        print(f"  LoRALinear wrappers: {lora_wrappers}")
+        print(f"  FusedQKVLoRALinear wrappers: {fused_wrappers}")
+        print(f"  trainable adapter params: {len(trainable)}")
+        print(f"  trainable q-slice params: {len(q_params)}")
+        print(f"  trainable k-slice params: {len(k_params)}")
+        print(f"  trainable v-slice params: {len(v_params)}")
+        if args.show_names:
+            print("  sample trainable params:")
+            for n in trainable[: max(1, int(args.max_names))]:
+                print(f"    - {n}")
 
 
 if __name__ == "__main__":

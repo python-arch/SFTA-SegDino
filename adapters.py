@@ -66,6 +66,88 @@ class LoRALinear(nn.Module):
         return y
 
 
+class FusedQKVLoRALinear(nn.Module):
+    """
+    LoRA wrapper for fused-qkv Linear layers (out_features = 3 * d).
+    Allows enabling LoRA for any subset of {Q, K, V} by writing only to that slice.
+    """
+
+    TOKEN_TO_INDEX = {"Q": 0, "K": 1, "V": 2}
+
+    def __init__(
+        self,
+        base: nn.Linear,
+        *,
+        enabled_tokens: Sequence[str],
+        r: int = 8,
+        alpha: int = 16,
+        dropout: float = 0.0,
+    ) -> None:
+        super().__init__()
+        if base.out_features % 3 != 0:
+            raise ValueError(f"FusedQKVLoRALinear expects out_features divisible by 3, got {base.out_features}")
+
+        enabled = [t.strip().upper() for t in enabled_tokens if t.strip().upper() in self.TOKEN_TO_INDEX]
+        if not enabled:
+            raise ValueError("FusedQKVLoRALinear requires at least one token from {Q,K,V}.")
+
+        self.base = base
+        for p in self.base.parameters():
+            p.requires_grad = False
+
+        self.enabled_tokens = tuple(enabled)
+        self.r = int(r)
+        self.alpha = int(alpha)
+        self.scaling = (self.alpha / self.r) if self.r > 0 else 1.0
+        self.dropout = nn.Dropout(dropout) if dropout and dropout > 0 else nn.Identity()
+        self.slice_dim = int(base.out_features // 3)
+
+        self.lora_A = nn.ParameterDict()
+        self.lora_B = nn.ParameterDict()
+        if self.r > 0:
+            device = base.weight.device
+            dtype = base.weight.dtype
+            for tok in self.enabled_tokens:
+                key = tok.lower()
+                a = nn.Parameter(torch.zeros(base.in_features, self.r, device=device, dtype=dtype))
+                b = nn.Parameter(torch.zeros(self.r, self.slice_dim, device=device, dtype=dtype))
+                nn.init.kaiming_uniform_(a, a=math.sqrt(5))
+                nn.init.zeros_(b)
+                self.lora_A[key] = a
+                self.lora_B[key] = b
+
+    @property
+    def in_features(self) -> int:
+        return self.base.in_features
+
+    @property
+    def out_features(self) -> int:
+        return self.base.out_features
+
+    @property
+    def weight(self) -> torch.Tensor:
+        return self.base.weight
+
+    @property
+    def bias(self) -> Optional[torch.Tensor]:
+        return self.base.bias
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        y = self.base(x)
+        if self.r <= 0:
+            return y
+
+        x_drop = self.dropout(x)
+        for tok in self.enabled_tokens:
+            key = tok.lower()
+            idx = self.TOKEN_TO_INDEX[tok]
+            start = idx * self.slice_dim
+            end = (idx + 1) * self.slice_dim
+            delta = self.scaling * (x_drop @ self.lora_A[key] @ self.lora_B[key])
+            y[..., start:end] = y[..., start:end] + delta
+        return y
+
+
 class SALTLinear(nn.Linear):
     """
     Minimal SALT-like parameterization:
@@ -233,9 +315,31 @@ def inject_lora_with_placement(
     replaced = 0
     for name, m in list(module.named_modules()):
         for child_name, child in list(m.named_children()):
-            if isinstance(child, nn.Linear) and _match_lora_placement(name, child_name, tokens):
-                setattr(m, child_name, LoRALinear(child, r=r, alpha=alpha, dropout=dropout))
+            if not isinstance(child, nn.Linear):
+                continue
+            if not _match_lora_placement(name, child_name, tokens):
+                continue
+
+            full_name = f"{name}.{child_name}".lower()
+            qkv_tokens = [t for t in ("Q", "K", "V") if t in tokens]
+            is_fused_qkv = ("qkv" in full_name) and (child.out_features % 3 == 0)
+            if is_fused_qkv and qkv_tokens:
+                setattr(
+                    m,
+                    child_name,
+                    FusedQKVLoRALinear(
+                        child,
+                        enabled_tokens=qkv_tokens,
+                        r=r,
+                        alpha=alpha,
+                        dropout=dropout,
+                    ),
+                )
                 replaced += 1
+                continue
+
+            setattr(m, child_name, LoRALinear(child, r=r, alpha=alpha, dropout=dropout))
+            replaced += 1
     return replaced
 
 
@@ -273,6 +377,11 @@ def set_only_adapter_trainable(model: nn.Module) -> int:
                 m.lora_A.requires_grad_(True)
             if isinstance(m.lora_B, torch.Tensor):
                 m.lora_B.requires_grad_(True)
+        if isinstance(m, FusedQKVLoRALinear):
+            for p in m.lora_A.values():
+                p.requires_grad_(True)
+            for p in m.lora_B.values():
+                p.requires_grad_(True)
         if isinstance(m, SALTLinear):
             for p in m.parameters():
                 # SALTLinear inherits nn.Linear and has frozen weight/bias; other parameters are trainable.
