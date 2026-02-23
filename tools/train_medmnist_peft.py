@@ -280,6 +280,8 @@ def main() -> None:
         if dataset_token not in DATASET_NUM_CLASSES:
             raise ValueError(f"Unknown dataset='{args.dataset}'. Provide --num_classes explicitly.")
         num_classes = DATASET_NUM_CLASSES[dataset_token]
+    # Keep args/config consistent for logging systems (e.g. wandb config is immutable by default).
+    args.num_classes = num_classes
 
     npz_path = Path(args.npz_dir) / f"{dataset_token}.npz"
     if not npz_path.is_file():
