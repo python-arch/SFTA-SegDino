@@ -11,6 +11,37 @@ from torch.nn import functional as F
 from einops import rearrange
 from typing import Type, Tuple, Optional
 
+
+def _normalize_dataset_key(name: str) -> str:
+    """Normalize dataset names so friendly aliases map to folder names."""
+    return "".join(ch.lower() for ch in str(name) if ch.isalnum())
+
+
+DATASET_FOLDER_ALIASES = {
+    "pneumoniamnist": "pneumoniamnist",
+    "dermamnist": "dermamnist",
+    "dermamnistmedmnist": "dermamnist",
+    "bloodmnist": "bloodmnist",
+    "bloodmnistmedmnist": "bloodmnist",
+    "organmnist": "organmnist",
+    "retinamnist": "retinamnist",
+}
+
+
+DATASET_DEFAULT_NUM_CLASSES = {
+    "pneumoniamnist": 2,
+    "dermamnist": 7,
+    "bloodmnist": 8,
+    "organmnist": 11,
+    "retinamnist": 5,
+}
+
+
+def resolve_dataset_folder_name(dataset_name: str) -> str:
+    key = _normalize_dataset_key(dataset_name)
+    return DATASET_FOLDER_ALIASES.get(key, dataset_name)
+
+
 def tensor_to_rgb(img_t: torch.Tensor, mean=None, std=None) -> np.ndarray:
     img = img_t.detach().cpu().float()
     img = img.clamp(0, 1).numpy()
@@ -400,6 +431,7 @@ def main():
         WANDB_AVAILABLE = True
     except ImportError:
         print("Wandb not available. Install with: pip install wandb")
+        wandb = None
         WANDB_AVAILABLE = False
 
     parser = argparse.ArgumentParser()
@@ -441,16 +473,26 @@ def main():
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(args.seed)
 
- 
-    wandb_run = wandb.init(
-        project=args.wandb_project,
-        entity=args.wandb_entity,
-        name=args.wandb_run_name or f"segdino_{args.dino_size}_{args.dataset}_{args.adapter}",
-        config=vars(args)
-    )
-    print(f"[Wandb] Initialized run: {wandb_run.name}")
+    dataset_folder_name = resolve_dataset_folder_name(args.dataset)
+    if dataset_folder_name != args.dataset:
+        print(f"[Dataset] '{args.dataset}' -> folder '{dataset_folder_name}'")
+    if args.num_classes == 1 and dataset_folder_name in DATASET_DEFAULT_NUM_CLASSES:
+        args.num_classes = DATASET_DEFAULT_NUM_CLASSES[dataset_folder_name]
+        print(f"[Dataset] auto num_classes={args.num_classes} for '{dataset_folder_name}'")
+
+    wandb_run = None
+    if WANDB_AVAILABLE:
+        wandb_run = wandb.init(
+            project=args.wandb_project,
+            entity=args.wandb_entity,
+            name=args.wandb_run_name or f"segdino_{args.dino_size}_{args.dataset}_{args.adapter}",
+            config=vars(args)
+        )
+        print(f"[Wandb] Initialized run: {wandb_run.name}")
+    else:
+        print("[Wandb] disabled (package not installed).")
   
-    save_root = f"./runs/segdino_{args.dino_size}_{args.input_h}_{args.dataset}_{args.adapter}"
+    save_root = f"./runs/segdino_{args.dino_size}_{args.input_h}_{dataset_folder_name}_{args.adapter}"
     os.makedirs(save_root, exist_ok=True)
     train_vis_dir = os.path.join(save_root, "train_vis")
     val_vis_dir = os.path.join(save_root, "val_vis")
@@ -498,9 +540,9 @@ def main():
 
     optimizer = torch.optim.AdamW(filter(lambda p: p.requires_grad, model.parameters()), lr=args.lr, weight_decay=args.weight_decay)
 
-    root = os.path.join(args.data_dir, args.dataset)
-    train_transform = ResizeAndNormalize(size=(args.input_h, args.input_w))
-    val_transform   = ResizeAndNormalize(size=(args.input_h, args.input_w))
+    root = os.path.join(args.data_dir, dataset_folder_name)
+    train_transform = ResizeAndNormalize(size=(args.input_h, args.input_w), num_classes=args.num_classes)
+    val_transform   = ResizeAndNormalize(size=(args.input_h, args.input_w), num_classes=args.num_classes)
     
     train_dataset = FolderDataset(
         root=root, 

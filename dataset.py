@@ -12,11 +12,12 @@ IMAGENET_MEAN = (0.485, 0.456, 0.406)
 IMAGENET_STD  = (0.229, 0.224, 0.225)
 
 class ResizeAndNormalize:
-    def __init__(self, size=(256, 256), mean=IMAGENET_MEAN, std=IMAGENET_STD, thr=0.5):
+    def __init__(self, size=(256, 256), mean=IMAGENET_MEAN, std=IMAGENET_STD, thr=0.5, num_classes: int = 1):
         self.size = size  # (H, W)
         self.mean = mean
         self.std = std
         self.thr = thr
+        self.num_classes = int(num_classes)
 
     def __call__(self, img_bgr: np.ndarray, mask_hwc: np.ndarray):
         img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
@@ -28,14 +29,21 @@ class ResizeAndNormalize:
         img_t = TF.to_tensor(img_resized)                   # Convert image to tensor
         img_t = TF.normalize(img_t, self.mean, self.std)    # Normalize with ImageNet mean and std
         H, W = self.size
-        mask_ts = []
-        for c in range(mask_hwc.shape[2]):
-            m = Image.fromarray(mask_hwc[..., c])
+        if self.num_classes <= 1:
+            mask_ts = []
+            for c in range(mask_hwc.shape[2]):
+                m = Image.fromarray(mask_hwc[..., c])
+                m = TF.resize(m, (H, W), interpolation=InterpolationMode.NEAREST)
+                mt = TF.to_tensor(m)[0]        # Take the single channel
+                mask_ts.append(mt)
+            mask_t = torch.stack(mask_ts, dim=0).float()   # Stack into (C,H,W)
+            mask_t = (mask_t > self.thr).float()           # Binarize mask by threshold
+        else:
+            # Multi-class mode: keep integer class IDs in a single channel.
+            m = Image.fromarray(mask_hwc[..., 0])
             m = TF.resize(m, (H, W), interpolation=InterpolationMode.NEAREST)
-            mt = TF.to_tensor(m)[0]        # Take the single channel
-            mask_ts.append(mt)
-        mask_t = torch.stack(mask_ts, dim=0).float()   # Stack into (C,H,W)
-        mask_t = (mask_t > self.thr).float()           # Binarize mask by threshold
+            m_np = np.array(m, dtype=np.int64)
+            mask_t = torch.from_numpy(m_np).unsqueeze(0).float()
         return img_t, mask_t
 
 

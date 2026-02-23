@@ -147,6 +147,31 @@ bash tools/run_baseline_suite.sh \
   --out_csv ./runs/adapt_peft_salt_mixed_ops4_S4.csv
 ```
 
+## MedMNIST One-Command LoRA Grid
+If you want to run LoRA grid search on:
+`PneumoniaMNIST, DermaMNIST, BloodMNIST, OrganMNIST, RetinaMNIST`
+on another machine, use:
+
+```bash
+bash tools/run_medmnist_lora_grid.sh \
+  --dino_ckpt /absolute/path/to/dinov3_vits16_pretrain_lvd1689m-08c60483.pth
+```
+
+What this does:
+- Downloads MedMNIST `.npz` files with `tools/download_medmnist.sh`.
+- Runs classification LoRA grid over datasets x ranks x seeds via `tools/train_medmnist_peft.py`.
+
+Notes:
+- `OrganMNIST` is mapped to one variant (`OrganA`) by default; override with `--organ_variant c` or `--organ_variant s`.
+- This path is classification-correct (cross-entropy on class labels, accuracy + AUC), not dense-mask conversion.
+- Use `--dry_run` to print all generated run commands before launching jobs.
+
+W&B sweep (classification) uses `sweep_lora.yaml`:
+```bash
+wandb sweep sweep_lora.yaml
+wandb agent <entity>/<project>/<sweep_id>
+```
+
 ## Learned Symbolic Descriptor Encoder (`E_θ`)
 Train a tiny mask encoder on source masks (`train/masks`) using structure-preserving augmentations:
 ```bash
