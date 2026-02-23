@@ -10,6 +10,7 @@ from torch.nn import functional as F
 
 
 ATTN_NAME_HINTS = ("attn", "attention", "qkv", "q_proj", "k_proj", "v_proj", "query", "key", "value", "proj", "out")
+PLACEMENT_TOKENS = ("Q", "K", "V", "P", "F1", "F2")
 
 
 def count_parameters(model: nn.Module) -> Tuple[int, int, float]:
@@ -159,6 +160,83 @@ def _should_wrap_linear(name: str, child_name: str, targets: Sequence[str] = ATT
     nl = name.lower()
     cl = child_name.lower()
     return any(t in nl or t in cl for t in targets)
+
+
+def parse_lora_placement(placement: str) -> Tuple[str, ...]:
+    """
+    Parse a placement string like "Q,K,V,P" into normalized placement tokens.
+    """
+    parts = [p.strip().upper() for p in str(placement).split(",") if p.strip()]
+    if not parts:
+        raise ValueError("Empty LoRA placement string.")
+    invalid = [p for p in parts if p not in PLACEMENT_TOKENS]
+    if invalid:
+        raise ValueError(
+            f"Invalid LoRA placement token(s): {invalid}. "
+            f"Allowed: {', '.join(PLACEMENT_TOKENS)}"
+        )
+    # keep order stable but de-duplicate
+    out: List[str] = []
+    for p in parts:
+        if p not in out:
+            out.append(p)
+    return tuple(out)
+
+
+def _match_lora_placement(name: str, child_name: str, placement_tokens: Sequence[str]) -> bool:
+    """
+    Match layer names for LoRA placement sweeps.
+
+    Tokens:
+    - Q/K/V: attention query/key/value projections (and qkv fused layers)
+    - P: attention output projection (attn.proj / out_proj / to_out)
+    - F1/F2: first/second FFN linear layers (fc1/fc2)
+    """
+    fn = f"{name}.{child_name}".lower()
+    tokens = set(placement_tokens)
+
+    # Q/K/V include fused qkv projection names.
+    if "Q" in tokens and any(h in fn for h in ("q_proj", "query", "to_q", "wq", "qkv")):
+        return True
+    if "K" in tokens and any(h in fn for h in ("k_proj", "key", "to_k", "wk", "qkv")):
+        return True
+    if "V" in tokens and any(h in fn for h in ("v_proj", "value", "to_v", "wv", "qkv")):
+        return True
+
+    # P should target attention output projection, not generic projections.
+    if "P" in tokens and ("attn" in fn or "attention" in fn):
+        if any(h in fn for h in ("out_proj", "to_out", ".proj", " proj", ".out")):
+            return True
+
+    # FFN projections.
+    if "F1" in tokens and any(h in fn for h in ("fc1", "linear1", "mlp.0", "ffn.0")):
+        return True
+    if "F2" in tokens and any(h in fn for h in ("fc2", "linear2", "mlp.2", "ffn.2")):
+        return True
+
+    return False
+
+
+def inject_lora_with_placement(
+    module: nn.Module,
+    *,
+    r: int,
+    alpha: int,
+    dropout: float,
+    placement: str,
+) -> int:
+    """
+    Inject LoRA only in layers selected by placement string, e.g.:
+      "Q", "Q,K,V", "P,F1,F2", "Q,K,V,P,F1,F2".
+    """
+    tokens = parse_lora_placement(placement)
+    replaced = 0
+    for name, m in list(module.named_modules()):
+        for child_name, child in list(m.named_children()):
+            if isinstance(child, nn.Linear) and _match_lora_placement(name, child_name, tokens):
+                setattr(m, child_name, LoRALinear(child, r=r, alpha=alpha, dropout=dropout))
+                replaced += 1
+    return replaced
 
 
 def inject_lora(module: nn.Module, *, r: int, alpha: int, dropout: float) -> int:

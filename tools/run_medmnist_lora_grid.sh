@@ -24,6 +24,7 @@ INPUT_SIZE="224"
 
 LORA_RANKS="4,8,16,32,64"
 SEEDS="42,7,2023"
+LORA_PLACEMENTS="Q;K;V;P;F1;Q,K;Q,V;F1,F2;Q,K,V;P,F1,F2;Q,K,V,P;Q,K,V,P,F1,F2"
 OUT_CSV="${REPO_ROOT}/runs/medmnist_cls/lora_grid_results.csv"
 
 WANDB="false"
@@ -51,6 +52,7 @@ while [[ $# -gt 0 ]]; do
     --input_size) INPUT_SIZE="$2"; shift 2;;
     --lora_ranks) LORA_RANKS="$2"; shift 2;;
     --seeds) SEEDS="$2"; shift 2;;
+    --lora_placements) LORA_PLACEMENTS="$2"; shift 2;;
     --out_csv) OUT_CSV="$2"; shift 2;;
     --wandb) WANDB="true"; shift 1;;
     --wandb_project) WANDB_PROJECT="$2"; shift 2;;
@@ -70,6 +72,8 @@ Core options:
   --datasets CSV              Dataset list (friendly names or tokens)
   --lora_ranks CSV            Default: 4,8,16,32,64
   --seeds CSV                 Default: 42,7,2023
+  --lora_placements STR       Semicolon-separated placement combos
+                              Default: Q;K;V;P;F1;Q,K;Q,V;F1,F2;Q,K,V;P,F1,F2;Q,K,V,P;Q,K,V,P,F1,F2
   --dry_run                   Print commands only
 
 Data options:
@@ -143,40 +147,45 @@ fi
 IFS=',' read -r -a DATASET_ITEMS <<< "$DATASETS"
 for dataset in "${DATASET_ITEMS[@]}"; do
   dataset="$(echo "$dataset" | sed 's/^ *//; s/ *$//')"
-  for lora_r in ${LORA_RANKS//,/ }; do
-    for seed in ${SEEDS//,/ }; do
-      CMD=(
-        python3 "${REPO_ROOT}/tools/train_medmnist_peft.py"
-        --npz_dir "$NPZ_DIR"
-        --dataset "$dataset"
-        --dino_ckpt "$DINO_CKPT"
-        --repo_dir "$REPO_DIR"
-        --dino_size "$DINO_SIZE"
-        --input_size "$INPUT_SIZE"
-        --epochs "$EPOCHS"
-        --batch_size "$BATCH_SIZE"
-        --num_workers "$NUM_WORKERS"
-        --lr "$LR"
-        --weight_decay "$WEIGHT_DECAY"
-        --adapter "lora"
-        --lora_r "$lora_r"
-        --seed "$seed"
-        --out_csv "$OUT_CSV"
-      )
-      if [[ "$WANDB" == "true" ]]; then
-        CMD+=(--wandb --wandb_project "$WANDB_PROJECT")
-        if [[ -n "$WANDB_ENTITY" ]]; then
-          CMD+=(--wandb_entity "$WANDB_ENTITY")
+  IFS=';' read -r -a PLACEMENT_ITEMS <<< "$LORA_PLACEMENTS"
+  for placement in "${PLACEMENT_ITEMS[@]}"; do
+    placement="$(echo "$placement" | sed 's/^ *//; s/ *$//')"
+    for lora_r in ${LORA_RANKS//,/ }; do
+      for seed in ${SEEDS//,/ }; do
+        CMD=(
+          python3 "${REPO_ROOT}/tools/train_medmnist_peft.py"
+          --npz_dir "$NPZ_DIR"
+          --dataset "$dataset"
+          --dino_ckpt "$DINO_CKPT"
+          --repo_dir "$REPO_DIR"
+          --dino_size "$DINO_SIZE"
+          --input_size "$INPUT_SIZE"
+          --epochs "$EPOCHS"
+          --batch_size "$BATCH_SIZE"
+          --num_workers "$NUM_WORKERS"
+          --lr "$LR"
+          --weight_decay "$WEIGHT_DECAY"
+          --adapter "lora"
+          --lora_r "$lora_r"
+          --lora_placement "$placement"
+          --seed "$seed"
+          --out_csv "$OUT_CSV"
+        )
+        if [[ "$WANDB" == "true" ]]; then
+          CMD+=(--wandb --wandb_project "$WANDB_PROJECT")
+          if [[ -n "$WANDB_ENTITY" ]]; then
+            CMD+=(--wandb_entity "$WANDB_ENTITY")
+          fi
         fi
-      fi
 
-      echo "[run] dataset=${dataset} lora_r=${lora_r} seed=${seed}"
-      if [[ "$DRY_RUN" == "true" ]]; then
-        printf ' %q' "${CMD[@]}"
-        echo
-      else
-        "${CMD[@]}"
-      fi
+        echo "[run] dataset=${dataset} placement=${placement} lora_r=${lora_r} seed=${seed}"
+        if [[ "$DRY_RUN" == "true" ]]; then
+          printf ' %q' "${CMD[@]}"
+          echo
+        else
+          "${CMD[@]}"
+        fi
+      done
     done
   done
 done

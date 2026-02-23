@@ -159,12 +159,14 @@ bash tools/run_medmnist_lora_grid.sh \
 
 What this does:
 - Downloads MedMNIST `.npz` files with `tools/download_medmnist.sh`.
-- Runs classification LoRA grid over datasets x ranks x seeds via `tools/train_medmnist_peft.py`.
+- Runs classification LoRA grid over datasets x placements x ranks x seeds via `tools/train_medmnist_peft.py`.
 
 Notes:
 - `OrganMNIST` is mapped to one variant (`OrganA`) by default; override with `--organ_variant c` or `--organ_variant s`.
 - This path is classification-correct (cross-entropy on class labels, accuracy + AUC), not dense-mask conversion.
 - Use `--dry_run` to print all generated run commands before launching jobs.
+- Default placement sweep includes:
+  `Q`, `K`, `V`, `P`, `F1`, `Q,K`, `Q,V`, `F1,F2`, `Q,K,V`, `P,F1,F2`, `Q,K,V,P`, `Q,K,V,P,F1,F2`.
 
 W&B sweep (classification) uses `sweep_lora.yaml`:
 ```bash

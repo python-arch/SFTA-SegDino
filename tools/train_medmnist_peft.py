@@ -25,7 +25,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from adapters import LoRALinear, count_parameters, inject_lora
+from adapters import LoRALinear, count_parameters, inject_lora_with_placement
 
 
 DATASET_ALIASES: Dict[str, str] = {
@@ -55,6 +55,10 @@ IMAGENET_STD = (0.229, 0.224, 0.225)
 
 def _normalize_name(name: str) -> str:
     return "".join(ch.lower() for ch in str(name) if ch.isalnum())
+
+
+def normalize_placement_tag(placement: str) -> str:
+    return "_".join([p.strip().upper() for p in str(placement).split(",") if p.strip()])
 
 
 def resolve_dataset_token(name: str) -> str:
@@ -171,13 +175,20 @@ def enable_lora_and_head_trainable(
     lora_r: int,
     lora_alpha: int,
     lora_dropout: float,
+    lora_placement: str,
 ) -> int:
     for p in model.parameters():
         p.requires_grad_(False)
 
     wrapped = 0
     if adapter == "lora":
-        wrapped = inject_lora(model.backbone, r=lora_r, alpha=lora_alpha, dropout=lora_dropout)
+        wrapped = inject_lora_with_placement(
+            model.backbone,
+            r=lora_r,
+            alpha=lora_alpha,
+            dropout=lora_dropout,
+            placement=lora_placement,
+        )
         for m in model.modules():
             if isinstance(m, LoRALinear):
                 if isinstance(m.lora_A, torch.Tensor):
@@ -261,6 +272,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--lora_r", type=int, default=8)
     p.add_argument("--lora_alpha", type=int, default=16)
     p.add_argument("--lora_dropout", type=float, default=0.05)
+    p.add_argument("--lora_placement", type=str, default="Q,K,V,P,F1,F2")
     p.add_argument("--out_dir", type=str, default="./runs/medmnist_cls")
     p.add_argument("--out_csv", type=str, default="./runs/medmnist_cls/results.csv")
     p.add_argument("--wandb", action="store_true")
@@ -307,6 +319,7 @@ def main() -> None:
         lora_r=int(args.lora_r),
         lora_alpha=int(args.lora_alpha),
         lora_dropout=float(args.lora_dropout),
+        lora_placement=str(args.lora_placement),
     )
     total_params, trainable_params, trainable_pct = count_parameters(model)
 
@@ -351,7 +364,8 @@ def main() -> None:
     )
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(optim, T_max=int(args.epochs))
 
-    run_dir = Path(args.out_dir) / f"{dataset_token}_r{args.lora_r}_seed{args.seed}_{args.adapter}"
+    placement_tag = normalize_placement_tag(args.lora_placement)
+    run_dir = Path(args.out_dir) / f"{dataset_token}_{placement_tag}_r{args.lora_r}_seed{args.seed}_{args.adapter}"
     run_dir.mkdir(parents=True, exist_ok=True)
     best_ckpt = run_dir / "best.pt"
 
@@ -366,7 +380,7 @@ def main() -> None:
             project=args.wandb_project,
             entity=args.wandb_entity,
             config=vars(args),
-            name=f"medmnist_{dataset_token}_r{args.lora_r}_s{args.seed}",
+            name=f"medmnist_{dataset_token}_{placement_tag}_r{args.lora_r}_s{args.seed}",
         )
         wandb_run.config.update(
             {
@@ -449,6 +463,7 @@ def main() -> None:
         "lora_r": int(args.lora_r),
         "lora_alpha": int(args.lora_alpha),
         "lora_dropout": float(args.lora_dropout),
+        "lora_placement": str(args.lora_placement),
         "seed": int(args.seed),
         "epochs": int(args.epochs),
         "batch_size": int(args.batch_size),
