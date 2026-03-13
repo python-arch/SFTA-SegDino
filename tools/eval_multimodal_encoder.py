@@ -40,6 +40,10 @@ def _load_multimodal_encoder(ckpt_path: str, device: str) -> MultiModalSymbolicE
     fusion = str(cfg_d.get("fusion", "mlp"))
     image_encoder = str(cfg_d.get("image_encoder", "small_cnn"))
     image_weights = str(cfg_d.get("image_weights", "none"))
+    image_pool = str(cfg_d.get("image_pool", "features"))
+    pool_dilate_px = int(cfg_d.get("pool_dilate_px", 0))
+    use_imagenet_norm = bool(cfg_d.get("use_imagenet_norm", True))
+    gate_hidden = int(cfg_d.get("gate_hidden", 64))
 
     mask_enc = SmallMaskEncoder(in_ch=2, embed_dim=embed_dim, width=mask_width)
     mm_cfg = MultiModalConfig(
@@ -49,6 +53,10 @@ def _load_multimodal_encoder(ckpt_path: str, device: str) -> MultiModalSymbolicE
         fusion=fusion,
         image_encoder=image_encoder,
         image_weights=image_weights,
+        image_pool=image_pool,
+        pool_dilate_px=pool_dilate_px,
+        use_imagenet_norm=use_imagenet_norm,
+        gate_hidden=gate_hidden,
     )
     model = MultiModalSymbolicEncoder(mask_encoder=mask_enc, cfg=mm_cfg)
     model.load_state_dict(state, strict=False)
@@ -233,4 +241,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

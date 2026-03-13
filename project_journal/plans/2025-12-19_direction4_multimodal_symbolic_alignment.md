@@ -15,6 +15,12 @@ In scope:
 - Run targeted stress tests on `mixed ops4 S4`.
 - Add ablations: mask-only vs image-only vs fused.
 
+MICCAI-hardening upgrades (added):
+- **Decouple appearance from pred mask** via **feature-map soft region pooling** (not raw `image * mask` pixels).
+- **Uncertainty-conditioned fusion** (gating uses prediction uncertainty stats; outputs weights for logging).
+- **Guarded memory-bank priors** (strict admission + outlier gate) to prevent drift.
+- **Robust descriptor training**: mask-only perturbations + modality dropout + stop-grad cross-modal alignment.
+
 Out of scope (Phase-2):
 - Topological persistence / equivariant encoders (higher risk/time).
 - “SALT variants” (SALT-G/SALT-S/A/SALT-Dial) beyond LoRA/SALT baselines.
@@ -22,16 +28,21 @@ Out of scope (Phase-2):
 ## Deliverables (what to implement)
 ### New/updated files (planned)
 - `symalign/multimodal_encoder.py`
-  - `ImageRegionEncoder` (appearance descriptor from masked image region)
-  - `MultiModalSymbolicEncoder` (wraps mask encoder + image encoder + fusion)
-  - `Fusion` module (start simple; attention weights optional)
+  - appearance from **feature maps** + soft region pooling (with optional mask dilation)
+  - `MultiModalSymbolicEncoder` returns `(s_fused, s_mask, s_img)` and can optionally return:
+    - fusion weights (`w_mask,w_region,w_global`)
+    - uncertainty stats (`conf/entropy/sharpness/area`)
+  - fusion supports `mlp|attn|uncertainty` (uncertainty-gated is the MICCAI method)
 - `symalign/multimodal_symbolic_loss.py`
-  - supports **single-stream** alignment (fused/mask/image) and **triple-prior** alignment (fused+mask+image) with separate EMA stats
+  - supports **EMA priors** and **guarded MemoryBank priors**
+  - single-stream alignment (fused/mask/image) and triple-stream alignment (fused+mask+image)
 - `symalign/multimodal_loss.py`
   - multi-objective contrastive: intra-mask, intra-image, cross-modal, fused consistency
+  - optional stop-gradient cross-modal terms for stability
 - `tools/train_multimodal_encoder.py`
   - trains multi-modal encoder on source train split (images + GT masks)
   - writes `runs/symalign_multimodal_encoder_kvasir/encoder_final.pth`
+  - adds mask-only perturbations and modality dropout options
 - `tools/eval_multimodal_encoder.py`
   - encoder sanity check: two-view retrieval / invariance for fused/mask/image streams
 - `tools/adapt_baselines.py`
@@ -44,12 +55,16 @@ Out of scope (Phase-2):
     - `masked_image = image * p` for appearance channel
   - keep EMA priors and confidence gating logic consistent.
 
-### Training objective (initial version)
-Train multi-modal encoder on source with structure-preserving geometric augs (shared image/mask) and photometric augs (image only).
+### Training objective (MICCAI-hardened)
+Train multi-modal encoder on source with:
+- structure-preserving geometric augs (shared image/mask)
+- photometric/noise augs (image only)
+- **mask-only perturbations** (dilation/erosion) + boundary recompute
+- **modality dropout** (drop mask/image branch sometimes)
 Loss components:
 - `L_mask`: contrastive on mask descriptors between two views of same mask
 - `L_img`: contrastive on image descriptors between two views of same image region
-- `L_cross`: align mask descriptor and image descriptor for same sample (cross-modal agreement)
+- `L_cross`: align mask descriptor and image descriptor for same sample (cross-modal agreement), with **stop-grad** option
 - `L_fused`: contrastive on fused descriptors between two views
 
 ## Evaluation plan (what to run)
@@ -94,9 +109,15 @@ PYTHONPATH="$(pwd)" python tools/train_multimodal_encoder.py \
   --out_h 256 \
   --out_w 256 \
   --embed_dim 64 \
-  --image_encoder small_cnn \
-  --image_weights none \
-  --fusion mlp
+  --image_encoder resnet18 \
+  --image_weights auto \
+  --image_pool features \
+  --pool_dilate_px 8 \
+  --fusion uncertainty \
+  --stopgrad_cross \
+  --modality_dropout_p 0.2 \
+  --mask_perturb_p 0.5 \
+  --max_mask_morph_radius 2
 ```
 
 Evaluate encoder invariance (two-view retrieval):
@@ -140,6 +161,13 @@ PYTHONPATH="$(pwd)" python tools/adapt_baselines.py \
   --multimodal_w_fused 1.0 \
   --multimodal_w_mask 0.5 \
   --multimodal_w_image 0.5 \
+  --symbolic_prior_type memory \
+  --symbolic_mem_capacity 1024 \
+  --symbolic_mem_min 64 \
+  --symbolic_outlier_cos 0.1 \
+  --symbolic_min_fg 0.001 \
+  --symbolic_max_fg 0.60 \
+  --symbolic_max_components 6 \
   --symbolic_lambda 0.1 \
   --symbolic_warmup_steps 150 \
   --symbolic_ema_momentum 0.99 \

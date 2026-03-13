@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Dict
 
 import torch
+import torch.nn.functional as F
 from torch.utils.data import DataLoader
 
 try:
@@ -45,6 +46,45 @@ def _load_mask_encoder(mask_ckpt: str, device: str) -> tuple[SmallMaskEncoder, D
         p.requires_grad_(False)
     return enc, {"embed_dim": embed_dim, "width": width, "raw_args": enc_args}
 
+def _boundary_band_torch(mask01: torch.Tensor, width: int = 2) -> torch.Tensor:
+    """
+    Approximate boundary band using dilate/erode in torch (no OpenCV).
+    mask01: (1,H,W) float in {0,1}
+    returns: (1,H,W) float in {0,1}
+    """
+    if width <= 0:
+        return torch.zeros_like(mask01)
+    m = mask01.unsqueeze(0)  # (1,1,H,W)
+    k = 2 * int(width) + 1
+    dil = F.max_pool2d(m, kernel_size=k, stride=1, padding=int(width))
+    ero = 1.0 - F.max_pool2d(1.0 - m, kernel_size=k, stride=1, padding=int(width))
+    bnd = (dil - ero).clamp(0.0, 1.0)
+    return (bnd > 0.5).float().squeeze(0)
+
+
+def _maybe_mask_perturb(mask_pair: torch.Tensor, rng: random.Random, *, max_radius: int, p: float, boundary_width: int) -> torch.Tensor:
+    """
+    mask_pair: (2,H,W) float in {0,1}
+    Applies a random dilation/erosion to the mask channel and recomputes boundary.
+    """
+    if max_radius <= 0 or p <= 0 or rng.random() >= p:
+        return mask_pair
+    r = rng.randint(0, int(max_radius))
+    if r <= 0:
+        return mask_pair
+
+    m = mask_pair[0:1]  # (1,H,W)
+    k = 2 * int(r) + 1
+    m4 = m.unsqueeze(0)  # (1,1,H,W)
+    if rng.random() < 0.5:
+        m2 = F.max_pool2d(m4, kernel_size=k, stride=1, padding=int(r))  # dilate
+    else:
+        m2 = 1.0 - F.max_pool2d(1.0 - m4, kernel_size=k, stride=1, padding=int(r))  # erode
+    m2 = (m2 > 0.5).float().squeeze(0)  # (1,H,W)
+
+    bnd = _boundary_band_torch(m2, width=boundary_width)
+    return torch.cat([m2, bnd], dim=0)
+
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Train multi-modal symbolic descriptor encoder (mask + image).")
@@ -79,15 +119,28 @@ def main() -> None:
         "--image_weights",
         type=str,
         default="none",
-        choices=["none", "imagenet"],
-        help="If using a torchvision backbone, optionally initialize with ImageNet weights (may require local availability).",
+        choices=["none", "imagenet", "auto"],
+        help="Use pretrained torchvision weights (auto/imagenet) or random init (none). Auto downloads/caches weights on first use.",
     )
-    parser.add_argument("--fusion", type=str, default="mlp", choices=["mlp", "attn"])
+    parser.add_argument("--image_pool", type=str, default="features", choices=["pixels", "features"])
+    parser.add_argument("--pool_dilate_px", type=int, default=0, help="Dilate pooling mask by N pixels before feature-region pooling.")
+    parser.add_argument(
+        "--no_imagenet_norm",
+        action="store_true",
+        help="Disable ImageNet normalization (enabled by default when using ImageNet weights).",
+    )
+    parser.add_argument("--fusion", type=str, default="mlp", choices=["mlp", "attn", "uncertainty"])
+    parser.add_argument("--gate_hidden", type=int, default=64)
 
     parser.add_argument("--w_mask", type=float, default=1.0)
     parser.add_argument("--w_image", type=float, default=1.0)
     parser.add_argument("--w_cross", type=float, default=0.5)
     parser.add_argument("--w_fused", type=float, default=1.0)
+    parser.add_argument("--stopgrad_cross", action="store_true", help="Use stop-gradient cross-modal InfoNCE (stabilizes training).")
+
+    parser.add_argument("--modality_dropout_p", type=float, default=0.0, help="Drop mask/image modality with probability p during training.")
+    parser.add_argument("--mask_perturb_p", type=float, default=0.5, help="Probability of applying mask-only morph perturbation.")
+    parser.add_argument("--max_mask_morph_radius", type=int, default=2)
 
     parser.add_argument("--max_rotate_deg", type=float, default=20.0)
     parser.add_argument("--hflip_p", type=float, default=0.5)
@@ -114,7 +167,11 @@ def main() -> None:
         image_encoder=args.image_encoder,
         image_width=args.image_width,
         image_weights=args.image_weights,
+        image_pool=args.image_pool,
+        pool_dilate_px=args.pool_dilate_px,
+        use_imagenet_norm=(not bool(args.no_imagenet_norm)),
         fusion=args.fusion,
+        gate_hidden=args.gate_hidden,
     )
     model = MultiModalSymbolicEncoder(mask_encoder=mask_enc, cfg=cfg).to(device)
 
@@ -150,6 +207,7 @@ def main() -> None:
     loss_fn = MultiModalContrastiveLoss(
         temperature=args.temperature,
         w=MultiModalLossWeights(mask=args.w_mask, image=args.w_image, cross=args.w_cross, fused=args.w_fused),
+        stopgrad_cross=bool(args.stopgrad_cross),
     )
 
     out_dir = Path(args.out_dir)
@@ -178,6 +236,20 @@ def main() -> None:
             for i in range(b):
                 img1, m1 = augment_pair(images[i], mask_pairs[i], aug_cfg, rng)
                 img2, m2 = augment_pair(images[i], mask_pairs[i], aug_cfg, rng)
+                m1 = _maybe_mask_perturb(
+                    m1,
+                    rng,
+                    max_radius=args.max_mask_morph_radius,
+                    p=args.mask_perturb_p,
+                    boundary_width=args.boundary_width,
+                )
+                m2 = _maybe_mask_perturb(
+                    m2,
+                    rng,
+                    max_radius=args.max_mask_morph_radius,
+                    p=args.mask_perturb_p,
+                    boundary_width=args.boundary_width,
+                )
                 imgs1.append(img1)
                 masks1.append(m1)
                 imgs2.append(img2)
@@ -188,8 +260,16 @@ def main() -> None:
             img2 = torch.stack(imgs2, dim=0)
             m2 = torch.stack(masks2, dim=0)
 
-            zf1, zm1, zi1 = model(img1, m1)
-            zf2, zm2, zi2 = model(img2, m2)
+            drop_mask = drop_img = None
+            if args.modality_dropout_p and args.modality_dropout_p > 0:
+                dm = torch.rand(img1.size(0), device=img1.device) < float(args.modality_dropout_p)
+                di = torch.rand(img1.size(0), device=img1.device) < float(args.modality_dropout_p)
+                both = dm & di
+                di = torch.where(both, torch.zeros_like(di, dtype=torch.bool), di)
+                drop_mask, drop_img = dm, di
+
+            zf1, zm1, zi1 = model(img1, m1, drop_mask=drop_mask, drop_image=drop_img)
+            zf2, zm2, zi2 = model(img2, m2, drop_mask=drop_mask, drop_image=drop_img)
             loss, logs = loss_fn(zf1, zm1, zi1, zf2, zm2, zi2)
 
             opt.zero_grad(set_to_none=True)
